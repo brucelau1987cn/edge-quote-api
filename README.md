@@ -14,6 +14,19 @@
 
 ---
 
+## 📋 部署条件与要求
+
+1. **Cloudflare 账号**（免费版账户即可，每日享 10 万次免费 Worker / Function 调用额度）。
+2. **Node.js 环境**（建议 Node 18+）。
+3. **部署模式选择**（支持 Worker 独立服务 或 Pages Functions 动态集成）：
+
+| 部署模式 | 适用场景 | 所需条件 / 文件 | 访问路径 |
+| :--- | :--- | :--- | :--- |
+| **Cloudflare Workers** | 独立 API 微服务 | 只需要当前仓库，运行 `npm run deploy` | `https://edge-quote-api.<your-subdomain>.workers.dev` |
+| **Pages Functions** | 无缝集成到现有的 Astro / Next.js 静态博客 | 拷贝 `src/index.js` 到博客项目的 `functions/api/public/v1/quote.js` 路径下 | `https://your-blog.pages.dev/api/public/v1/quote` |
+
+---
+
 ## 📡 API 参数与使用说明
 
 ### `GET /api/public/v1/quote`
@@ -26,16 +39,16 @@
 
 ```bash
 # 1. 查 A 股与 ETF
-curl "https://<your-worker>.workers.dev/api/public/v1/quote?symbols=600021.SH,159915.SZ"
+curl "https://<your-domain>/api/public/v1/quote?symbols=600021.SH,159915.SZ"
 
 # 2. 查港股与美股
-curl "https://<your-worker>.workers.dev/api/public/v1/quote?symbols=00700.HK,AAPL.US"
+curl "https://<your-domain>/api/public/v1/quote?symbols=00700.HK,AAPL.US"
 
 # 3. 查外盘期货 (WTI原油) 与内盘黄金
-curl "https://<your-worker>.workers.dev/api/public/v1/quote?symbols=hf_CL,nf_AU0"
+curl "https://<your-domain>/api/public/v1/quote?symbols=hf_CL,nf_AU0"
 
 # 4. 全市场跨品类混合查询
-curl "https://<your-worker>.workers.dev/api/public/v1/quote?symbols=600021,00700,AAPL,hf_CL"
+curl "https://<your-domain>/api/public/v1/quote?symbols=600021,00700,AAPL,hf_CL"
 ```
 
 #### 3. 响应 JSON 示例
@@ -87,7 +100,9 @@ curl "https://<your-worker>.workers.dev/api/public/v1/quote?symbols=600021,00700
 
 ---
 
-## 🛠️ 本地开发与部署
+## 🛠️ 本地开发与部署流程
+
+### 方式一：部署为独立 Cloudflare Worker
 
 ```bash
 # 1. 克隆项目与安装依赖
@@ -95,15 +110,24 @@ git clone https://github.com/brucelau1987cn/edge-quote-api.git
 cd edge-quote-api
 npm install
 
-# 2. 运行单元测试
+# 2. 运行本地测试
 npm test
 
-# 3. 本地启动 Wrangler 调试
+# 3. 本地启动 Cloudflare 模拟环境调试
 npm run dev
 
-# 4. 部署至 Cloudflare Workers
+# 4. 一键部署至你的 Cloudflare 账户
+npx wrangler login
 npm run deploy
 ```
+
+### 方式二：集成到现有 Cloudflare Pages 静态博客（Astro / Next.js / Nuxt）
+
+无需额外部署 Worker 服务，只需将当前仓库中的 `src/index.js` 拷贝重命名至你的博客项目根目录下的 `functions/api/public/v1/quote.js`。
+
+Cloudflare Pages 部署构建时会自动将其编译为边缘 Serverless 路由！
+
+---
 
 ## 📄 License
 MIT License
