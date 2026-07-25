@@ -60,3 +60,26 @@ test('fetchQuote returns structured data and falls back gracefully', { skip: off
   assert.ok(result.quotes['600021']);
   assert.ok(result.quotes['00700']);
 });
+
+
+test('fetchQuote parses Sina continuous futures when Tencent empty', async () => {
+  const mock = `var hq_str_nf_AU0="黄金连续,023000,887.000,893.080,885.360,0.000,887.500,887.780,887.780,0.000,885.840,5,3,153816.000,70579,沪,黄金,2026-07-25,1,,,,,,,,,889.362,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0";\nvar hq_str_nf_SC0="上海原油连续,023000,580.000,585.600,565.200,0.000,577.100,578.000,577.700,0.000,592.800,4,17,46925.000,121141,沪,上海原油,2026-07-25,1,,,,,,,,,575.582,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0";\n`;
+  const encoder = new TextEncoder();
+  const previous = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const urlStr = typeof url === 'string' ? url : url.url;
+    if (urlStr.includes('xueqiu.com/about')) return new Response('', { headers: { 'set-cookie': 'xq_a_token=mock; path=/' } });
+    if (urlStr.includes('qt.gtimg.cn')) return new Response(encoder.encode('v_pv_none_match="1";'), { status: 200 });
+    if (urlStr.includes('hq.sinajs.cn')) return new Response(encoder.encode(mock), { status: 200 });
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    const result = await fetchQuote('nf_AU0,nf_SC0');
+    assert.equal(result.status, 'ok');
+    assert.equal(result.source, 'sina');
+    assert.equal(result.quotes.nf_AU0.price, 887.78);
+    assert.equal(result.quotes.nf_SC0.price, 577.7);
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
