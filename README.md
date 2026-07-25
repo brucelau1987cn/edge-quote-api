@@ -2,60 +2,68 @@
 
 极速、零服务器依赖的**全市场（A股、港股、美股、内外盘期货）**实时行情代理 API，基于 Cloudflare Edge Serverless 架构。
 
-## 🌟 特性
-- ⚡ **全球边缘毫秒级响应**：运行在 Cloudflare Edge Function 节点。
-- 🌏 **支持全市场标的**：
-  - **A 股 / ETF**：支持 `600021.SH` / `159915.SZ` 或纯代码 `600021` 自动识别
-  - **港股**：支持 `00700.HK`、`hk00700` 或 5 位数字 `00700` 自动识别
-  - **美股**：支持 `AAPL.US`、`usAAPL` 或纯英文 `AAPL` 自动识别
-  - **期货**：外盘期货（如 `hf_CL` 原油、`hf_GC` 黄金）、内盘期货（如 `nf_AU0` 沪金主连）
-- 📦 **支持单只与批量请求**：支持逗号分隔批量传参，单次最高可查 50 只标的。
-- 🚀 **内置 5s 边缘缓存与 CORS 跨域支持**：原生支持网页端直接 Fetch 调用。
+## 特性
+- 全球边缘毫秒级响应：运行在 Cloudflare Edge Function 节点。
+- 支持全市场标的：
+  - **A 股 / ETF**：`600021.SH` / `159915.SZ` 或纯代码 `600021`
+  - **港股**：`00700.HK`、`hk00700` 或 5 位数字 `00700`
+  - **美股**：`AAPL.US`、`usAAPL` 或纯英文 `AAPL`
+  - **期货**：外盘（`hf_CL`）与内盘（`nf_AU0`）
+- 单只与批量请求：逗号分隔，单次最高 50 只。
+- 三源降级：腾讯 → 新浪 → 雪球（自动抓取访客 token）。
+- 5s 边缘缓存与 CORS。
 
----
+## 双入口导出（Workers + Pages）
 
-## 📋 部署条件与要求
+`src/index.js` 同时导出：
 
-1. **Cloudflare 账号**（免费版账户即可，每日享 10 万次免费 Worker / Function 调用额度）。
-2. **Node.js 环境**（建议 Node 18+）。
-3. **部署模式选择**（支持 Worker 独立服务 或 Pages Functions 动态集成）：
+- `onRequestGet({ request })` — Cloudflare **Pages Functions**
+- `default.fetch(request)` — Cloudflare **Workers**
 
-| 部署模式 | 适用场景 | 所需条件 / 文件 | 访问路径 |
-| :--- | :--- | :--- | :--- |
-| **Cloudflare Workers** | 独立 API 微服务 | 只需要当前仓库，运行 `npm run deploy` | `https://edge-quote-api.<your-subdomain>.workers.dev` |
-| **Pages Functions** | 无缝集成到现有的 Astro / Next.js 静态博客 | 拷贝 `src/index.js` 到博客项目的 `functions/api/public/v1/quote.js` 路径下 | `https://your-blog.pages.dev/api/public/v1/quote` |
+集成到 [etf-rotation-blog](https://github.com/brucelau1987cn/etf-rotation-blog) 时，在 blog 仓库执行：
 
----
+```sh
+npm run sync:quote
+# 将本仓库 src/index.js 同步到
+# etf-rotation-blog/functions/api/public/v1/quote.js
+```
 
-## 📡 API 参数与使用说明
+**本仓库是行情逻辑唯一源**。不要只在 blog 的 `functions/` 里改 quote 实现。
+
+## 部署条件
+
+1. Cloudflare 账号（免费额度可用）
+2. Node.js 18+
+3. 模式：
+
+| 部署模式 | 适用场景 | 命令 / 路径 |
+| :--- | :--- | :--- |
+| Workers | 独立 API | `npm run deploy` → `https://edge-quote-api.<subdomain>.workers.dev` |
+| Pages Functions | 嵌入 Astro 站 | 同步到 blog `functions/api/public/v1/quote.js` |
+
+## API
 
 ### `GET /api/public/v1/quote`
 
-#### 1. 请求参数
-- `symbols` / `symbol`: 标的代码（支持逗号分隔批量查询）
-- `exchange`（可选）: 默认交易所（`SSE` / `SZSE`）
+参数：
+- `symbols` / `symbol`：逗号分隔代码
+- `exchange`（可选）：默认 `SSE` / `SZSE`
 
-#### 2. 调用示例
+示例：
 
 ```bash
-# 1. 查 A 股与 ETF
 curl "https://<your-domain>/api/public/v1/quote?symbols=600021.SH,159915.SZ"
-
-# 2. 查港股与美股
 curl "https://<your-domain>/api/public/v1/quote?symbols=00700.HK,AAPL.US"
-
-# 3. 查外盘期货 (WTI原油) 与内盘黄金
 curl "https://<your-domain>/api/public/v1/quote?symbols=hf_CL,nf_AU0"
-
-# 4. 全市场跨品类混合查询
-curl "https://<your-domain>/api/public/v1/quote?symbols=600021,00700,AAPL,hf_CL"
 ```
 
-#### 3. 响应 JSON 示例
+响应：
+
 ```json
 {
   "status": "ok",
-  "count": 3,
+  "source": "tencent",
+  "count": 1,
   "quotes": {
     "600021": {
       "symbol": "600021",
@@ -64,70 +72,25 @@ curl "https://<your-domain>/api/public/v1/quote?symbols=600021,00700,AAPL,hf_CL"
       "market": "A-SHARE",
       "price": 14.21,
       "prev_close": 15.34,
-      "open": 15.1,
-      "high": 15.11,
-      "low": 14.2,
-      "change_amount": -1.13,
       "change_percent": -7.37,
       "quote_time": "2026-07-24T16:14:56+08:00",
-      "status": "ok"
-    },
-    "00700": {
-      "symbol": "00700",
-      "sec_code": "hk00700",
-      "name": "腾讯控股",
-      "market": "HK-SHARE",
-      "price": 434.6,
-      "prev_close": 445.2,
-      "change_percent": -2.38,
-      "quote_time": "2026-07-24T16:08:10+08:00",
-      "status": "ok"
-    },
-    "hf_CL": {
-      "symbol": "hf_CL",
-      "sec_code": "hf_CL",
-      "name": "纽约原油",
-      "market": "FUTURES",
-      "price": 90.72,
-      "prev_close": 92.55,
-      "change_percent": -1.98,
-      "quote_time": "2026-07-25T04:59:58+08:00",
       "status": "ok"
     }
   }
 }
 ```
 
----
+前端请用 blog 的 `normalizeQuotePayload` 统一转成 `{ ok, items }`，避免各页各自解析。
 
-## 🛠️ 本地开发与部署流程
+## 本地开发
 
-### 方式一：部署为独立 Cloudflare Worker
-
-```bash
-# 1. 克隆项目与安装依赖
-git clone https://github.com/brucelau1987cn/edge-quote-api.git
-cd edge-quote-api
+```sh
 npm install
-
-# 2. 运行本地测试
 npm test
-
-# 3. 本地启动 Cloudflare 模拟环境调试
 npm run dev
-
-# 4. 一键部署至你的 Cloudflare 账户
 npx wrangler login
 npm run deploy
 ```
 
-### 方式二：集成到现有 Cloudflare Pages 静态博客（Astro / Next.js / Nuxt）
-
-无需额外部署 Worker 服务，只需将当前仓库中的 `src/index.js` 拷贝重命名至你的博客项目根目录下的 `functions/api/public/v1/quote.js`。
-
-Cloudflare Pages 部署构建时会自动将其编译为边缘 Serverless 路由！
-
----
-
-## 📄 License
+## License
 MIT License
