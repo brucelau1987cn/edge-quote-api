@@ -1,0 +1,15 @@
+{
+  "name": "edge-quote-api",
+  "version": "1.0.0",
+  "description": "Cloudflare Edge Stock Quote API for A-Share and ETF real-time data",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.114.0"
+  }
+}
