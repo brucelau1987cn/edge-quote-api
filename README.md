@@ -47,31 +47,35 @@ npm run sync:quote
 ### 当前生产状态
 
 - **主路径**：`https://etf.peekabo.cc/api/public/v1/quote`（blog Pages Functions）
-- **次路径**：独立 Worker `edge-quote-api`（需 Workers 写权限 token）
-- 本机 Pages token 可部署 Pages，但目前 **不能** 写 Workers services（`Authentication error [code: 10000]`）
+- **次路径**：`https://edge-quote-api.brucelau1987.workers.dev`（独立 Worker，已部署）
+- 双活验证：`npm run verify:dual`
+- 凭证约定（本机，不入库）：
+  - Pages：`~/.hermes/credentials/cloudflare-pages.env`（`CLOUDFLARE_API_TOKEN`）
+  - Workers：`~/.hermes/credentials/cloudflare-global.env`（`CLOUDFLARE_EMAIL` + `CLOUDFLARE_API_KEY`）
 
 ### 双活命令
 
 ```sh
-# 仅验证：Pages 主路径必测；若设置了 EDGE_QUOTE_WORKER_URL 再测 Worker
+# 验证 Pages 主路径 + Worker 次路径
 npm run verify:dual
 
-# 尝试部署 Worker + 验证（需要 Workers Scripts:Edit token）
-export CLOUDFLARE_API_TOKEN=...
+# 部署/更新独立 Worker，并验证双活
+# 优先读取 ~/.hermes/credentials/cloudflare-global.env
 npm run deploy:dual
 ```
 
-Worker token 最小权限：
+Worker 认证任选其一：
 
-- Account → **Workers Scripts → Edit**
-- Account → Account Settings → Read（推荐）
-- User → Memberships → Read（推荐）
+1. **Global API Key**（本机已用于首次双活上线）  
+   `CLOUDFLARE_EMAIL` + `CLOUDFLARE_API_KEY`
+2. **API Token**（更推荐长期）：Account → **Workers Scripts → Edit**
 
-在 Worker 写权限补齐前，标准发布链路保持：
+标准发布链路（前端仍走 Pages 同源 quote）：
 
 ```sh
 # edge-quote-api
 OFFLINE=1 npm test
+npm run deploy:dual
 git push
 
 # etf-rotation-blog

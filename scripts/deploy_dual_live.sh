@@ -9,9 +9,19 @@ cd "$ROOT"
 
 ACCOUNT_HINT="325ec15c00814124ef32ac0a72f2c08f"
 WORKER_NAME="edge-quote-api"
-WORKER_URL_DEFAULT=""
+WORKER_URL_DEFAULT="https://edge-quote-api.brucelau1987.workers.dev"
 WORKER_URL="${EDGE_QUOTE_WORKER_URL:-$WORKER_URL_DEFAULT}"
 PAGES_QUOTE_URL="${PAGES_QUOTE_URL:-https://etf.peekabo.cc/api/public/v1/quote}"
+
+# Prefer Global API Key auth for Worker ops if local dual-live credentials exist.
+# Pages deploy continues to use cloudflare-pages.env separately.
+if [[ -z "${CLOUDFLARE_API_TOKEN:-}" && -z "${CLOUDFLARE_API_KEY:-}" && -f /root/.hermes/credentials/cloudflare-global.env ]]; then
+  # shellcheck disable=SC1091
+  source /root/.hermes/credentials/cloudflare-global.env
+fi
+if [[ -n "${CLOUDFLARE_API_KEY:-}" && -n "${CLOUDFLARE_EMAIL:-}" ]]; then
+  unset CLOUDFLARE_API_TOKEN
+fi
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -110,7 +120,7 @@ fi
 if [[ -n "$WORKER_URL" ]]; then
   echo
   echo "== probe secondary Worker path"
-  # Worker root may expose quote at / or require a path; try common forms.
+  # Worker serves quote on any path (root and /api/public/v1/quote both work).
   if probe_quote "worker-root" "$WORKER_URL"; then
     :
   elif probe_quote "worker-path" "$WORKER_URL/api/public/v1/quote"; then
