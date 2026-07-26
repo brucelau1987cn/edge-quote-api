@@ -7,7 +7,11 @@ import {
   getXueqiuToken,
   clearQuoteCache,
   getQuoteCacheStats,
+  resolveQuoteCacheTtlMs,
   QUOTE_CACHE_TTL_MS,
+  QUOTE_CACHE_TTL_OPEN_MS,
+  QUOTE_CACHE_TTL_CLOSED_MS,
+  QUOTE_CACHE_TTL_WEEKEND_MS,
 } from '../src/index.js';
 
 test('parseSymbol auto-detects markets and maps to all three sources', () => {
@@ -97,10 +101,38 @@ test('onRequestGet short-caches identical batches and exposes HIT/MISS headers',
     assert.equal(stats.hit, 1);
     assert.ok(stats.miss >= 1);
     assert.ok(QUOTE_CACHE_TTL_MS >= 1000);
+    assert.equal(stats.open_ttl_ms, QUOTE_CACHE_TTL_OPEN_MS);
+    assert.ok(['open_cn', 'open_us', 'open_overlap', 'closed', 'weekend'].includes(stats.session));
+    assert.ok(Number(res1.headers.get('x-quote-cache-ttl-ms')) >= QUOTE_CACHE_TTL_OPEN_MS);
+    assert.ok(res1.headers.get('x-quote-cache-session'));
   } finally {
     globalThis.fetch = previous;
     clearQuoteCache();
   }
+});
+
+test('resolveQuoteCacheTtlMs uses short TTL in open sessions and longer when closed', () => {
+  // Monday 10:00 Asia/Shanghai ≈ open CN
+  const cnOpen = resolveQuoteCacheTtlMs(new Date('2026-07-27T02:00:00.000Z'));
+  assert.equal(cnOpen.ttlMs, QUOTE_CACHE_TTL_OPEN_MS);
+  assert.equal(cnOpen.session, 'open_cn');
+
+  // Monday 22:00 Asia/Shanghai / 10:00 America/New_York ≈ open US
+  const usOpen = resolveQuoteCacheTtlMs(new Date('2026-07-27T14:00:00.000Z'));
+  assert.equal(usOpen.ttlMs, QUOTE_CACHE_TTL_OPEN_MS);
+  assert.equal(usOpen.session, 'open_us');
+
+  // Monday 12:00 Asia/Shanghai lunch / pre-US ≈ closed
+  const closed = resolveQuoteCacheTtlMs(new Date('2026-07-27T04:00:00.000Z'));
+  assert.equal(closed.ttlMs, QUOTE_CACHE_TTL_CLOSED_MS);
+  assert.equal(closed.session, 'closed');
+
+  // Saturday both weekend
+  const weekend = resolveQuoteCacheTtlMs(new Date('2026-07-25T08:00:00.000Z'));
+  assert.equal(weekend.ttlMs, QUOTE_CACHE_TTL_WEEKEND_MS);
+  assert.equal(weekend.session, 'weekend');
+  assert.ok(QUOTE_CACHE_TTL_WEEKEND_MS > QUOTE_CACHE_TTL_CLOSED_MS);
+  assert.ok(QUOTE_CACHE_TTL_CLOSED_MS > QUOTE_CACHE_TTL_OPEN_MS);
 });
 
 test('onRequestGet uses caches.default as L2 when memory empty', async () => {

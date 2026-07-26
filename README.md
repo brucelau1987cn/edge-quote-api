@@ -11,7 +11,7 @@
   - **期货**：外盘（`hf_CL`）与内盘（`nf_AU0`）
 - 单只与批量请求：逗号分隔，单次最高 50 只。
 - 三源降级：腾讯 → 新浪 → 雪球（自动抓取访客 token）。
-- 双层短缓存：L1 isolate 内存 Map + L2 `caches.default`（默认 4s）。
+- 双层短缓存：L1 isolate 内存 Map + L2 `caches.default`（开市 4s / 休市 30s / 周末 60s）。
 - 可观测响应头：`x-quote-cache` / `x-quote-cache-layer` / `x-quote-source`。
 - 强制刷新：`?nocache=1` 或 `?refresh=1`。
 - 5s CDN `cache-control` 与 CORS。
@@ -69,7 +69,8 @@ x-quote-cache: HIT
 x-quote-cache-layer: edge
 x-quote-cache-age-ms: 812
 x-quote-source: tencent
-x-quote-cache-ttl-ms: 4000
+x-quote-cache-ttl-ms: 30000
+x-quote-cache-session: closed
 ```
 
 站点侧部署/探针契约见 blog 仓库：
