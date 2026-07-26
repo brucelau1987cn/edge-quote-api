@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "deploy:dual": "bash scripts/deploy_dual_live.sh --deploy-worker",
+    "verify:dual": "bash scripts/deploy_dual_live.sh",
     "test": "node --test tests/*.mjs tests/*.test.mjs"
   },
   "devDependencies": {

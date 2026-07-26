@@ -41,8 +41,47 @@ npm run sync:quote
 
 | 部署模式 | 适用场景 | 命令 / 路径 |
 | :--- | :--- | :--- |
-| Workers | 独立 API | `npm run deploy` → `https://edge-quote-api.<subdomain>.workers.dev` |
-| Pages Functions | 嵌入 Astro 站 | 同步到 blog `functions/api/public/v1/quote.js` |
+| Workers | 独立 API（可选双活） | `npm run deploy` / `npm run deploy:dual` |
+| Pages Functions | **当前生产主路径** | 同步到 blog `functions/api/public/v1/quote.js` |
+
+### 当前生产状态
+
+- **主路径**：`https://etf.peekabo.cc/api/public/v1/quote`（blog Pages Functions）
+- **次路径**：独立 Worker `edge-quote-api`（需 Workers 写权限 token）
+- 本机 Pages token 可部署 Pages，但目前 **不能** 写 Workers services（`Authentication error [code: 10000]`）
+
+### 双活命令
+
+```sh
+# 仅验证：Pages 主路径必测；若设置了 EDGE_QUOTE_WORKER_URL 再测 Worker
+npm run verify:dual
+
+# 尝试部署 Worker + 验证（需要 Workers Scripts:Edit token）
+export CLOUDFLARE_API_TOKEN=...
+npm run deploy:dual
+```
+
+Worker token 最小权限：
+
+- Account → **Workers Scripts → Edit**
+- Account → Account Settings → Read（推荐）
+- User → Memberships → Read（推荐）
+
+在 Worker 写权限补齐前，标准发布链路保持：
+
+```sh
+# edge-quote-api
+OFFLINE=1 npm test
+git push
+
+# etf-rotation-blog
+npm run sync:quote
+npm run deploy:pages
+npm run verify:pages
+```
+
+站点侧完整契约：  
+[`docs/deploy-cache-probe-contract.md`](https://github.com/brucelau1987cn/etf-rotation-blog/blob/main/docs/deploy-cache-probe-contract.md)
 
 ## API
 
