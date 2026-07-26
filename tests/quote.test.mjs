@@ -76,12 +76,14 @@ test('onRequestGet short-caches identical batches and exposes HIT/MISS headers',
     const res1 = await onRequestGet({ request: req1 });
     const data1 = await res1.json();
     assert.equal(res1.headers.get('x-quote-cache'), 'MISS');
+    assert.equal(res1.headers.get('x-quote-cache-layer'), 'none');
     assert.equal(data1.quotes['600021'].price, 14.6);
 
     const req2 = new Request('https://example.com/api/public/v1/quote?symbol=600021&exchange=SSE');
     const res2 = await onRequestGet({ request: req2 });
     const data2 = await res2.json();
     assert.equal(res2.headers.get('x-quote-cache'), 'HIT');
+    assert.equal(res2.headers.get('x-quote-cache-layer'), 'memory');
     assert.equal(data2.quotes['600021'].price, 14.6);
     assert.equal(upstreamCalls, 1);
 
@@ -97,6 +99,65 @@ test('onRequestGet short-caches identical batches and exposes HIT/MISS headers',
     assert.ok(QUOTE_CACHE_TTL_MS >= 1000);
   } finally {
     globalThis.fetch = previous;
+    clearQuoteCache();
+  }
+});
+
+test('onRequestGet uses caches.default as L2 when memory empty', async () => {
+  clearQuoteCache();
+  const mockGbk = `v_sh600021="1~上海电力~600021~14.60~15.34~15.10~406482~155174~250958~14.60~5704~14.59~346~14.58~1476~14.57~761~14.56~1464~14.61~179~14.62~232~14.63~30~14.64~345~14.65~712~~20260724104135~-0.74~-4.82~15.11~14.60~14.60/406482/601828334~406482~60183~1.44~16.44~~15.11~14.60~3.32~411.99~411.99~2.08~16.87~13.81~1.14~8253~14.81~18.16~14.89~~~1.56~60182.8334~0.0000~0~   A~GP-A~-25.70~-2.08~2.53~7.26~2.35~31.41~8.89~4.29~-2.93~-15.36~2821875805~2821875805~73.37~-45.99~2821875805~~~61.50~-0.34~~CNY~0~___D__F__N~14.51~944~";`;
+  const encoder = new TextEncoder();
+  let upstreamCalls = 0;
+  const store = new Map();
+  const previousFetch = globalThis.fetch;
+  const previousCaches = globalThis.caches;
+  globalThis.caches = {
+    default: {
+      async match(req) {
+        const key = typeof req === 'string' ? req : req.url;
+        return store.get(key) || undefined;
+      },
+      async put(req, res) {
+        const key = typeof req === 'string' ? req : req.url;
+        store.set(key, res.clone());
+      },
+    },
+  };
+  globalThis.fetch = async (url) => {
+    const urlStr = typeof url === 'string' ? url : url.url;
+    if (urlStr.includes('xueqiu.com/about')) {
+      return new Response('', { headers: { 'set-cookie': 'xq_a_token=mock_xq_token; path=/' } });
+    }
+    if (urlStr.includes('qt.gtimg.cn')) {
+      upstreamCalls += 1;
+      return new Response(encoder.encode(mockGbk), { status: 200 });
+    }
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    const miss = await onRequestGet({
+      request: new Request('https://example.com/api/public/v1/quote?symbol=600021&exchange=SSE'),
+    });
+    assert.equal(miss.headers.get('x-quote-cache'), 'MISS');
+    assert.equal(upstreamCalls, 1);
+    assert.ok(store.size >= 1);
+
+    // drop L1 only — L2 edge should still hit
+    clearQuoteCache();
+    // restore edge store after clearQuoteCache (stats only; store is external)
+    // store still populated
+    const hit = await onRequestGet({
+      request: new Request('https://example.com/api/public/v1/quote?symbol=600021&exchange=SSE'),
+    });
+    assert.equal(hit.headers.get('x-quote-cache'), 'HIT');
+    assert.equal(hit.headers.get('x-quote-cache-layer'), 'edge');
+    assert.equal(upstreamCalls, 1);
+    const stats = getQuoteCacheStats();
+    assert.equal(stats.edge_hit, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousCaches === undefined) delete globalThis.caches;
+    else globalThis.caches = previousCaches;
     clearQuoteCache();
   }
 });
