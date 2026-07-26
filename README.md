@@ -11,7 +11,10 @@
   - **期货**：外盘（`hf_CL`）与内盘（`nf_AU0`）
 - 单只与批量请求：逗号分隔，单次最高 50 只。
 - 三源降级：腾讯 → 新浪 → 雪球（自动抓取访客 token）。
-- 5s 边缘缓存与 CORS。
+- 双层短缓存：L1 isolate 内存 Map + L2 `caches.default`（默认 4s）。
+- 可观测响应头：`x-quote-cache` / `x-quote-cache-layer` / `x-quote-source`。
+- 强制刷新：`?nocache=1` 或 `?refresh=1`。
+- 5s CDN `cache-control` 与 CORS。
 
 ## 双入口导出（Workers + Pages）
 
@@ -48,6 +51,7 @@ npm run sync:quote
 参数：
 - `symbols` / `symbol`：逗号分隔代码
 - `exchange`（可选）：默认 `SSE` / `SZSE`
+- `nocache=1` / `refresh=1`（可选）：绕过短缓存
 
 示例：
 
@@ -55,7 +59,21 @@ npm run sync:quote
 curl "https://<your-domain>/api/public/v1/quote?symbols=600021.SH,159915.SZ"
 curl "https://<your-domain>/api/public/v1/quote?symbols=00700.HK,AAPL.US"
 curl "https://<your-domain>/api/public/v1/quote?symbols=hf_CL,nf_AU0"
+curl -I "https://<your-domain>/api/public/v1/quote?symbols=600021&exchange=SSE"
 ```
+
+缓存响应头示例：
+
+```http
+x-quote-cache: HIT
+x-quote-cache-layer: edge
+x-quote-cache-age-ms: 812
+x-quote-source: tencent
+x-quote-cache-ttl-ms: 4000
+```
+
+站点侧部署/探针契约见 blog 仓库：
+[`docs/deploy-cache-probe-contract.md`](https://github.com/brucelau1987cn/etf-rotation-blog/blob/main/docs/deploy-cache-probe-contract.md)
 
 响应：
 
