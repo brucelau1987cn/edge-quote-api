@@ -54,11 +54,48 @@ test('fetchQuote fills dollar index from Sina DINIW when Tencent misses it', asy
   try {
     const result = await fetchQuote('hf_CL,DINIW');
     assert.equal(result.status, 'ok');
-    assert.equal(result.source, 'mixed');
-    assert.equal(result.quotes.hf_CL.price, 82.73);
+    // Preferred continuous codes now come from Sina first.
+    assert.equal(result.source, 'sina');
     assert.equal(result.quotes.DINIW.name, 'USD Index');
     assert.equal(result.quotes.DINIW.price, 101.3585);
     assert.equal(result.quotes.DINIW.change_percent, -0.05);
+    assert.equal(result.quotes.DINIW.source, 'sina');
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
+
+test('fetchQuote prefers Sina for 24H continuous gold/silver/oil and parses hf layout', async () => {
+  const sina = [
+    'var hq_str_hf_XAU="4030.82,4028.420,4030.82,4031.17,4037.72,4010.24,11:08:00,4028.42,4028.97,0,0,0,2026-07-29,伦敦金（现货黄金）";',
+    'var hq_str_hf_XAG="57.60,57.083,57.60,57.66,57.97,56.84,11:08:00,57.08,57.14,0,0,0,2026-07-29,伦敦银（现货白银）";',
+    'var hq_str_hf_CL="82.571,,82.480,82.500,83.300,79.920,11:08:14,79.260,80.040,0,1,3,2026-07-29,纽约原油,0";',
+    'var hq_str_DINIW="11:08:20,101.3400,101.3400,101.4203,1091,101.4108,101.4542,101.3344,101.3400,美元指数,2026-07-29";',
+  ].join('\n');
+  const previous = globalThis.fetch;
+  let tencentCalls = 0;
+  globalThis.fetch = async (url) => {
+    const value = typeof url === 'string' ? url : url.url;
+    if (value.includes('qt.gtimg.cn')) {
+      tencentCalls += 1;
+      return new Response(new TextEncoder().encode('v_pv_none_match="1";'), { status: 200 });
+    }
+    if (value.includes('hq.sinajs.cn')) return new Response(new TextEncoder().encode(sina), { status: 200 });
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    const result = await fetchQuote('hf_XAU,hf_XAG,hf_CL,DINIW');
+    assert.equal(result.status, 'ok');
+    assert.equal(result.source, 'sina');
+    assert.equal(tencentCalls, 0);
+    assert.equal(result.quotes.hf_XAU.price, 4030.82);
+    assert.equal(result.quotes.hf_XAU.change_percent, 0.06);
+    assert.equal(result.quotes.hf_XAU.source, 'sina');
+    assert.equal(result.quotes.hf_XAG.price, 57.6);
+    assert.equal(result.quotes.hf_XAG.change_percent, 0.91);
+    assert.equal(result.quotes.hf_CL.price, 82.571);
+    assert.equal(result.quotes.hf_CL.change_percent, 4.18);
+    assert.equal(result.quotes.DINIW.price, 101.34);
     assert.equal(result.quotes.DINIW.source, 'sina');
   } finally {
     globalThis.fetch = previous;
@@ -270,9 +307,11 @@ test('getXueqiuToken auto-fetches token from xueqiu.com', { skip: offline }, asy
 test('fetchQuote returns structured data and falls back gracefully', { skip: offline }, async () => {
   const result = await fetchQuote('600021.SH,00700.HK,AAPL.US,hf_CL');
   assert.equal(result.status, 'ok');
-  assert.ok(['tencent', 'sina', 'xueqiu'].includes(result.source));
+  assert.ok(['tencent', 'sina', 'xueqiu', 'mixed'].includes(result.source));
   assert.ok(result.quotes['600021']);
   assert.ok(result.quotes['00700']);
+  assert.ok(result.quotes.hf_CL);
+  assert.equal(result.quotes.hf_CL.source, 'sina');
 });
 
 
