@@ -29,6 +29,69 @@ test('parseSymbol auto-detects markets and maps to all three sources', () => {
   assert.equal(p3.tencent, 'hk00700');
   assert.equal(p3.sina, 'hk00700');
   assert.equal(p3.xueqiu, '00700');
+
+  assert.equal(parseSymbol('HSI.HK').tencent, 'hkHSI');
+  assert.equal(parseSymbol('HSTECH.HK').tencent, 'hkHSTECH');
+  assert.equal(parseSymbol('HSCI.HK').displayCode, 'HSCI');
+  assert.equal(parseSymbol('INX.US').tencent, 'usINX');
+  assert.equal(parseSymbol('IXIC.US').tencent, 'usIXIC');
+  assert.equal(parseSymbol('DJI.US').tencent, 'usDJI');
+  assert.equal(parseSymbol('DINIW').sina, 'DINIW');
+  assert.equal(parseSymbol('DXY').displayCode, 'DINIW');
+  assert.equal(parseSymbol('hf_CL').type, 'futures');
+});
+
+test('fetchQuote fills dollar index from Sina DINIW when Tencent misses it', async () => {
+  const tencent = 'v_hf_CL="82.73,4.38,82.65,82.66,83.30,79.92,10:17:05,79.26,80.04,0,1,1,2026-07-29,NY Crude";';
+  const sina = 'var hq_str_DINIW="10:18:41,101.3585,101.3585,101.4203,1091,101.4108,101.4542,101.3451,101.3585,USD Index,2026-07-29";\n';
+  const previous = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const value = typeof url === 'string' ? url : url.url;
+    if (value.includes('qt.gtimg.cn')) return new Response(new TextEncoder().encode(tencent), { status: 200 });
+    if (value.includes('hq.sinajs.cn')) return new Response(new TextEncoder().encode(sina), { status: 200 });
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    const result = await fetchQuote('hf_CL,DINIW');
+    assert.equal(result.status, 'ok');
+    assert.equal(result.source, 'mixed');
+    assert.equal(result.quotes.hf_CL.price, 82.73);
+    assert.equal(result.quotes.DINIW.name, 'USD Index');
+    assert.equal(result.quotes.DINIW.price, 101.3585);
+    assert.equal(result.quotes.DINIW.change_percent, -0.05);
+    assert.equal(result.quotes.DINIW.source, 'sina');
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
+
+test('fetchQuote fills Hang Seng Composite Index from official dashboard', async () => {
+  const tencent = `v_hkHSI="100~恒生指数~HSI~25092.740~24963.230~24993.770~5995512~0~0~25092.740~0~0~0~0~0~0~0~0~0~25092.740~0~0~0~0~0~0~0~0~0~0.0~2026/07/27 10:16:44~129.510~0.52~25097.820~24938.340";\nv_pv_none_match="1";`;
+  const dashboard = {
+    regions: [{ regionId: 'hongkong', dashboardList: [{
+      indexName: 'Hang Seng Composite Index', indexCode: '00011.00', indexValue: '3688.34',
+      changeValue: '+20.93', changePercentage: '+0.57', previousClose: '3667.41',
+      lastUpdate: '2026-07-27 10:33:00', url: 'hsci',
+    }] }],
+  };
+  const previous = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const value = typeof url === 'string' ? url : url.url;
+    if (value.includes('qt.gtimg.cn')) return new Response(new TextEncoder().encode(tencent), { status: 200 });
+    if (value.includes('hsi.com.hk/data/eng/rt/dashboard.do')) return Response.json(dashboard);
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    const result = await fetchQuote('HSI.HK,HSCI.HK');
+    assert.equal(result.status, 'ok');
+    assert.equal(result.quotes.HSI.price, 25092.74);
+    assert.equal(result.quotes.HSCI.name, '恒生综合指数');
+    assert.equal(result.quotes.HSCI.price, 3688.34);
+    assert.equal(result.quotes.HSCI.change_percent, 0.57);
+    assert.equal(result.count, 2);
+  } finally {
+    globalThis.fetch = previous;
+  }
 });
 
 test('onRequestGet returns JSON with mocked Tencent upstream', async () => {
