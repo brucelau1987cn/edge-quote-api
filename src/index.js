@@ -288,7 +288,10 @@ export function parseSymbol(rawSymbol, defaultExchange = 'SSE') {
   if (/^[A-Za-z]{1,5}$/.test(s)) return { tencent: `us${s}`, sina: `gb_${s.toLowerCase()}`, xueqiu: s.toUpperCase(), displayCode: s.toUpperCase(), type: 'us' };
 
   if (/^\d{6}$/.test(s)) {
-    const isSZ = defaultExchange === 'SZSE' || s.startsWith('159') || s.startsWith('300') || s.startsWith('00') || s.startsWith('399');
+    // SZSE: 00xxxx main, 15/16/18 funds, 30 ChiNext, 39 indices; also 159 ETFs.
+    const isSZ = defaultExchange === 'SZSE'
+      || /^(00|15|16|18|30|39)/.test(s)
+      || s.startsWith('159');
     const prefix = isSZ ? 'sz' : 'sh';
     return { tencent: `${prefix}${s}`, sina: `${prefix}${s}`, xueqiu: `${prefix.toUpperCase()}${s}`, displayCode: s, type: 'a' };
   }
@@ -822,12 +825,390 @@ export async function fetchQuote(symbolsStr, defaultExchange = 'SSE') {
   throw new Error('All upstream quote sources (Tencent, Sina, Xueqiu) failed');
 }
 
+/** 1-minute kline short cache (separate from realtime quote cache). */
+const KLINE_CACHE_TTL_MS = 15000;
+const klineCache = new Map(); // key -> { expiresAt, payload, storedAt }
+
+function normalizeKlineCacheKey(symbol, limit, at) {
+  return `kline1m|${String(symbol || '').toUpperCase()}|${limit || 240}|${at || ''}`;
+}
+
+function readKlineCache(key) {
+  const row = klineCache.get(key);
+  if (!row) return null;
+  if (Date.now() > row.expiresAt) {
+    klineCache.delete(key);
+    return null;
+  }
+  return row;
+}
+
+function writeKlineCache(key, payload, ttlMs = KLINE_CACHE_TTL_MS) {
+  if (klineCache.size >= QUOTE_CACHE_MAX_ENTRIES) {
+    const first = klineCache.keys().next().value;
+    if (first) klineCache.delete(first);
+  }
+  klineCache.set(key, {
+    expiresAt: Date.now() + ttlMs,
+    payload,
+    storedAt: Date.now(),
+    ttlMs,
+  });
+}
+
+export function clearKlineCache() {
+  klineCache.clear();
+}
+
+/** Normalize free-form trigger time to Asia/Shanghai minute key YYYY-MM-DD HH:mm */
+export function normalizeShanghaiMinuteKey(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  // Already Shanghai wall-clock with date+time, no zone.
+  const bare = raw.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})(?::\d{2})?$/);
+  if (bare && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(raw)) {
+    return `${bare[1]} ${bare[2]}:${bare[3]}`;
+  }
+  // Compact tencent style 202607291015
+  const compact = raw.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})$/);
+  if (compact) {
+    return `${compact[1]}-${compact[2]}-${compact[3]} ${compact[4]}:${compact[5]}`;
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(date)
+      .filter((p) => p.type !== 'literal')
+      .map((p) => [p.type, p.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+function toShanghaiIsoMinute(minuteKey) {
+  // minuteKey: YYYY-MM-DD HH:mm
+  return `${minuteKey.replace(' ', 'T')}:00+08:00`;
+}
+
+function parseTencentMinuteBars(payload, secCode) {
+  const root = payload?.data?.[secCode];
+  if (!root) return [];
+  const bars = [];
+
+  // Intraday minute stream: ["0930 71.73 611 4382703.00", ...]
+  const minuteRows = root?.data?.data;
+  if (Array.isArray(minuteRows) && minuteRows.length) {
+    // Date may appear in qt fields; fall back to Asia/Shanghai today.
+    const todayParts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      })
+        .formatToParts(new Date())
+        .filter((p) => p.type !== 'literal')
+        .map((p) => [p.type, p.value]),
+    );
+    const day = `${todayParts.year}-${todayParts.month}-${todayParts.day}`;
+    for (const row of minuteRows) {
+      const text = String(row || '').trim();
+      const m = text.match(/^(\d{4})\s+([0-9.]+)/);
+      if (!m) continue;
+      const hh = m[1].slice(0, 2);
+      const mm = m[1].slice(2, 4);
+      const close = parseFloat(m[2]);
+      if (!(close > 0)) continue;
+      const minuteKey = `${day} ${hh}:${mm}`;
+      bars.push({
+        minute: minuteKey,
+        time: toShanghaiIsoMinute(minuteKey),
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 0,
+        source: 'tencent-minute',
+      });
+    }
+  }
+
+  // Historical 1m kline: [["202607291015","open","close","high","low","volume",{}, "amount"], ...]
+  const m1 = root?.m1;
+  if (Array.isArray(m1) && m1.length) {
+    for (const row of m1) {
+      if (!Array.isArray(row) || row.length < 5) continue;
+      const stamp = String(row[0] || '');
+      if (!/^\d{12}$/.test(stamp)) continue;
+      const minuteKey = `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)} ${stamp.slice(8, 10)}:${stamp.slice(10, 12)}`;
+      const open = parseFloat(row[1]) || 0;
+      const close = parseFloat(row[2]) || 0;
+      const high = parseFloat(row[3]) || 0;
+      const low = parseFloat(row[4]) || 0;
+      const volume = parseFloat(row[5]) || 0;
+      if (!(close > 0 || open > 0)) continue;
+      bars.push({
+        minute: minuteKey,
+        time: toShanghaiIsoMinute(minuteKey),
+        open,
+        high,
+        low,
+        close: close || open,
+        volume,
+        source: 'tencent-m1',
+      });
+    }
+  }
+
+  return bars;
+}
+
+function parseSinaMinuteBars(payload) {
+  if (!Array.isArray(payload)) return [];
+  const bars = [];
+  for (const row of payload) {
+    const day = String(row?.day || '');
+    const m = day.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2})(?::\d{2})?$/);
+    if (!m) continue;
+    const minuteKey = `${m[1]} ${m[2]}:${m[3]}`;
+    const open = parseFloat(row.open) || 0;
+    const high = parseFloat(row.high) || 0;
+    const low = parseFloat(row.low) || 0;
+    const close = parseFloat(row.close) || 0;
+    const volume = parseFloat(row.volume) || 0;
+    if (!(close > 0 || open > 0)) continue;
+    bars.push({
+      minute: minuteKey,
+      time: toShanghaiIsoMinute(minuteKey),
+      open,
+      high,
+      low,
+      close: close || open,
+      volume,
+      source: 'sina-m1',
+    });
+  }
+  return bars;
+}
+
+function mergeMinuteBars(...lists) {
+  const byMinute = new Map();
+  // Later lists overwrite earlier ones when same minute (prefer richer OHLC sources).
+  for (const list of lists) {
+    for (const bar of list || []) {
+      if (!bar?.minute || !(Number(bar.close) > 0)) continue;
+      byMinute.set(bar.minute, bar);
+    }
+  }
+  return Array.from(byMinute.values()).sort((a, b) => a.minute.localeCompare(b.minute));
+}
+
+export function pickMinuteBar(bars, at) {
+  if (!Array.isArray(bars) || bars.length === 0) return null;
+  const key = normalizeShanghaiMinuteKey(at);
+  if (!key) return bars[bars.length - 1] || null;
+  const exact = bars.find((bar) => bar.minute === key);
+  if (exact) return exact;
+  // nearest previous bar within same day
+  const day = key.slice(0, 10);
+  const sameDay = bars.filter((bar) => bar.minute.startsWith(day) && bar.minute <= key);
+  if (sameDay.length) return sameDay[sameDay.length - 1];
+  return null;
+}
+
+async function fetchTencentMinuteBars(parsed, limit = 320) {
+  const secCode = parsed.tencent;
+  if (!secCode || parsed.type === 'fx' || parsed.type === 'futures') {
+    return [];
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    // Prefer multi-day mkline; also pull today's minute stream for denser same-day points.
+    const [mklineRes, minuteRes] = await Promise.all([
+      fetch(`https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${encodeURIComponent(secCode)},m1,,${Math.max(60, Math.min(limit, 800))}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://finance.qq.com/' },
+        signal: controller.signal,
+      }),
+      fetch(`https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=${encodeURIComponent(secCode)}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://finance.qq.com/' },
+        signal: controller.signal,
+      }),
+    ]);
+    const bars = [];
+    if (mklineRes.ok) {
+      bars.push(...parseTencentMinuteBars(await mklineRes.json(), secCode));
+    }
+    if (minuteRes.ok) {
+      bars.push(...parseTencentMinuteBars(await minuteRes.json(), secCode));
+    }
+    return bars;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchSinaMinuteBars(parsed, limit = 480) {
+  // Sina 1m endpoint is reliable for A-share sz/sh codes.
+  if (!parsed?.sina || !(parsed.sina.startsWith('sz') || parsed.sina.startsWith('sh') || parsed.sina.startsWith('bj'))) {
+    return [];
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const url = `https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData?symbol=${encodeURIComponent(parsed.sina)}&scale=1&ma=no&datalen=${Math.max(60, Math.min(limit, 1000))}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        Referer: 'https://finance.sina.com.cn/',
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Sina kline HTTP ${res.status}`);
+    const payload = await res.json();
+    return parseSinaMinuteBars(payload);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * Cloudflare Pages Functions entry (functions/api/public/v1/quote.js)
+ * Fetch 1-minute bars for one symbol via Cloudflare edge upstreams.
+ * Sources: Sina 1m K first, Tencent minute/m1 as fill.
+ */
+export async function fetchKline1m(symbol, { limit = 240, at = null, defaultExchange = 'SSE' } = {}) {
+  const parsed = parseSymbol(symbol, defaultExchange);
+  if (!parsed) throw new Error('invalid symbol');
+  if (parsed.type !== 'a') {
+    // First ship A-share/ETF 1m only; HK/US/futures can be added later.
+    throw new Error('1m kline currently supports A-share/ETF symbols only');
+  }
+
+  const errors = [];
+  let sinaBars = [];
+  let tencentBars = [];
+  try {
+    sinaBars = await fetchSinaMinuteBars(parsed, Math.max(limit, 240));
+  } catch (err) {
+    errors.push(`sina: ${err.message}`);
+  }
+  try {
+    tencentBars = await fetchTencentMinuteBars(parsed, Math.max(limit, 320));
+  } catch (err) {
+    errors.push(`tencent: ${err.message}`);
+  }
+
+  // Prefer Sina OHLC (richer), fill gaps with Tencent.
+  const bars = mergeMinuteBars(tencentBars, sinaBars);
+  if (!bars.length) {
+    throw new Error(errors.length ? errors.join('; ') : 'no 1m bars available');
+  }
+
+  const clipped = bars.slice(Math.max(0, bars.length - limit));
+  const sourceSet = new Set(clipped.map((b) => (b.source || '').split('-')[0]).filter(Boolean));
+  const source = sourceSet.size > 1 ? 'mixed' : (sourceSet.values().next().value || 'unknown');
+  const bar = at ? pickMinuteBar(clipped, at) : clipped[clipped.length - 1];
+
+  return {
+    status: 'ok',
+    interval: '1m',
+    symbol: parsed.displayCode,
+    sec_code: parsed.tencent,
+    source,
+    count: clipped.length,
+    at: at || null,
+    at_minute: at ? normalizeShanghaiMinuteKey(at) : null,
+    bar: bar || null,
+    bars: clipped,
+  };
+}
+
+/**
+ * Cloudflare Pages Functions entry (functions/api/public/v1/quote.js or kline.js)
  * and Workers entry (export default.fetch) share this handler.
  */
 export async function onRequestGet({ request }) {
   const url = new URL(request.url);
+  const path = url.pathname || '';
+  const isKline = /\/kline(?:\.js)?$/i.test(path) || url.searchParams.get('mode') === 'kline';
+
+  if (isKline) {
+    const symbol = url.searchParams.get('symbol') || url.searchParams.get('symbols') || '';
+    const exchange = (url.searchParams.get('exchange') || 'SSE').toUpperCase();
+    const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit') || 240) || 240));
+    const at = url.searchParams.get('at') || url.searchParams.get('time') || null;
+    const bypassCache = url.searchParams.get('nocache') === '1' || url.searchParams.get('refresh') === '1';
+    const cacheKey = normalizeKlineCacheKey(symbol, limit, at);
+    const headers = {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'public, max-age=10, s-maxage=10, stale-while-revalidate=30',
+      'x-content-type-options': 'nosniff',
+      'access-control-allow-origin': '*',
+      'x-quote-cache-ttl-ms': String(KLINE_CACHE_TTL_MS),
+      'x-quote-cache-session': 'kline_1m',
+    };
+    try {
+      if (!symbol) {
+        return new Response(JSON.stringify({ status: 'error', message: 'symbol required' }), {
+          status: 400,
+          headers,
+        });
+      }
+      if (!bypassCache) {
+        const hit = readKlineCache(cacheKey);
+        if (hit) {
+          headers['x-quote-cache'] = 'HIT';
+          headers['x-quote-cache-layer'] = 'memory';
+          headers['x-quote-cache-age-ms'] = String(Math.max(0, Date.now() - hit.storedAt));
+          headers['x-quote-source'] = String(hit.payload?.source || 'unknown');
+          return new Response(JSON.stringify(hit.payload), { status: 200, headers });
+        }
+      }
+      const data = await fetchKline1m(symbol, { limit, at, defaultExchange: exchange });
+      // Response for fixed-time lookup can omit full bars unless include_bars=1.
+      const includeBars = url.searchParams.get('include_bars') === '1' || !at;
+      const payload = includeBars
+        ? data
+        : {
+            status: data.status,
+            interval: data.interval,
+            symbol: data.symbol,
+            sec_code: data.sec_code,
+            source: data.source,
+            count: data.count,
+            at: data.at,
+            at_minute: data.at_minute,
+            bar: data.bar,
+          };
+      if (!bypassCache && payload?.status === 'ok') {
+        writeKlineCache(cacheKey, payload, KLINE_CACHE_TTL_MS);
+      }
+      headers['x-quote-cache'] = bypassCache ? 'BYPASS' : 'MISS';
+      headers['x-quote-cache-layer'] = 'none';
+      headers['x-quote-cache-age-ms'] = '0';
+      headers['x-quote-source'] = String(payload?.source || 'unknown');
+      return new Response(JSON.stringify(payload), {
+        status: payload.status === 'ok' ? 200 : 400,
+        headers,
+      });
+    } catch (err) {
+      headers['x-quote-cache'] = 'ERROR';
+      headers['x-quote-source'] = 'none';
+      return new Response(JSON.stringify({ status: 'error', message: err.message || 'internal error' }), {
+        status: 500,
+        headers,
+      });
+    }
+  }
+
   const symbols = url.searchParams.get('symbols') || url.searchParams.get('symbol') || '600021';
   const exchange = (url.searchParams.get('exchange') || 'SSE').toUpperCase();
   const bypassCache = url.searchParams.get('nocache') === '1' || url.searchParams.get('refresh') === '1';

@@ -39,6 +39,10 @@ test('parseSymbol auto-detects markets and maps to all three sources', () => {
   assert.equal(parseSymbol('DINIW').sina, 'DINIW');
   assert.equal(parseSymbol('DXY').displayCode, 'DINIW');
   assert.equal(parseSymbol('hf_CL').type, 'futures');
+  // ChiNext / SZ bare codes must map to sz*, not sh*.
+  assert.equal(parseSymbol('301511').tencent, 'sz301511');
+  assert.equal(parseSymbol('000021').tencent, 'sz000021');
+  assert.equal(parseSymbol('600021').tencent, 'sh600021');
 });
 
 test('fetchQuote fills dollar index from Sina DINIW when Tencent misses it', async () => {
