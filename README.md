@@ -159,6 +159,7 @@ A 股筹码分布 V2。Worker 与 Pages 主接口使用同一源文件和响应�
 - `symbol`：沪深六位 A 股代码，首期支持 `00` / `30` / `60` / `68` 开头。
 - `adjust`：`""`（不复权）、`qfq`、`hfq`。
 - `limit`：规范整数 `1–90`，默认 `90`；`01`、`1.0`、`1e0` 会被拒绝。
+- `provider`：`auto`（默认，腾讯失败后 BaoStock）、`tencent` 或 `baostock`；主要用于探针和故障排查。
 - `refresh=1` / `nocache=1`：跳过已完成缓存，相同在途计算继续合并；响应使用 `no-store`。
 
 ```bash
@@ -177,9 +178,9 @@ curl "https://etf.peekabo.cc/api/public/v1/chip?symbol=600021&adjust=hfq&limit=1
 ## 筹码 V2 注意事项
 
 - 腾讯路径用“每日成交量 ÷ 当前流通股本”估算历史换手率。股本变动期间可能产生偏差；响应中的 `assumptions.turnover_source` 会明确标注。
-- 腾讯失败时才尝试东财 `push2his`；该上游在部分网络环境可能返回 HTTP 520。
+- 腾讯失败后通过 Cloudflare `cloudflare:sockets` 直连 BaoStock TCP，三种复权均使用 BaoStock 每日真实换手率；生产无需本地或天翼云代理。
 - 错误响应经过脱敏并设置 `Cache-Control: no-store`，提供商细节只写入 Worker 结构化日志。
-- `src/index.js` 与 `src/chip.js` 是唯一源。Pages 同步必须让 import 和 re-export 都指向 `./_chip.js`，避免 `chip.js` 路由自引用循环。
+- `src/index.js`、`src/chip.js` 与 `src/baostock.js` 是唯一源。Pages 同步必须让 import/re-export 分别指向 `./_chip.js` 和 `./_baostock.js`，避免路由自引用循环。
 - `SI=F` / `GC=F` / `CL=F` 连续合约别名需在 quote、chip、kline 三个生成模块中保持一致。
 - Worker 和 Pages 是两个独立部署目标。修改后分别部署，并对两个入口用相同参数比较状态码、JSON 字段和缓存头。
 - Cloudflare 凭据只放在本机凭据文件或 CI Secret，严禁提交 Global API Key、API Token、邮箱密钥组合。

@@ -137,6 +137,21 @@ test('chip route validates A-share symbol before upstream fetch', async () => {
   }
 });
 
+test('Tencent failure falls back to BaoStock daily turnover source', async () => {
+  clearChipCache();
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.includes('qt.gtimg.cn')) return quoteResponse({ floatMv: 0 });
+    return new Response('{}', { status: 520 });
+  };
+  try {
+    const res = await onRequestGet({ request: new Request('https://example.com/api/public/v1/chip?symbol=600021&adjust=qfq') });
+    assert.equal(res.status, 502);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test('missing circulating shares returns sanitized no-store error', async () => {
   clearChipCache();
   const previous = globalThis.fetch;
