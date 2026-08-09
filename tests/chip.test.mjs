@@ -5,6 +5,7 @@ import {
   fetchKlineFromTencent,
   onRequestGet,
   clearChipCache,
+  parseSymbol,
 } from '../src/index.js';
 
 const GOLDEN_ROWS = [
@@ -188,4 +189,74 @@ test('chip cache coalesces concurrent requests and refresh bypasses stored resul
   } finally {
     globalThis.fetch = previous;
   }
+});
+
+test('Yahoo continuous aliases remain available in the shared parser', () => {
+  assert.equal(parseSymbol('SI=F').tencent, 'hf_XAG');
+  assert.equal(parseSymbol('GC=F').tencent, 'hf_XAU');
+  assert.equal(parseSymbol('CL=F').tencent, 'hf_CL');
+});
+
+test('AkShare total-zero semantics return zero costs', () => {
+  const series = computeChipDistributionSeries([
+    { date: '2026-08-07', open: 10, close: 10, high: 10, low: 10, hsl: 0 },
+  ], 90);
+  assert.deepEqual(series[0], {
+    date: '2026-08-07', profit_ratio_pct: 0, average_cost: 0,
+    average_cost_deviation_pct: -100, cost_90_low: 0, cost_90_high: 0,
+    concentration_90_pct: 0, cost_70_low: 0, cost_70_high: 0,
+    concentration_70_pct: 0,
+  });
+});
+
+test('limit one still returns adjacent previous and same-calculator change', async () => {
+  clearChipCache();
+  const rows = GOLDEN_ROWS.map((r) => [r.date, r.open, r.close, r.high, r.low, '1000']);
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.includes('qt.gtimg.cn')) return quoteResponse();
+    if (value.includes(',qfq')) return tencentKlineResponse('qfqday', rows);
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    const res = await onRequestGet({ request: new Request('https://example.com/api/public/v1/chip?symbol=600021&adjust=qfq&limit=1&refresh=1') });
+    const body = await res.json();
+    assert.equal(body.series.length, 1);
+    assert.equal(body.latest.date, '2026-08-07');
+    assert.equal(body.previous.date, '2026-08-06');
+    assert.equal(typeof body.profit_ratio_change_pp, 'number');
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test('limit requires a canonical integer token', async () => {
+  for (const limit of ['1.0', '01', '1e0', '90.0']) {
+    const res = await onRequestGet({ request: new Request(`https://example.com/api/public/v1/chip?symbol=600021&limit=${limit}`) });
+    assert.equal(res.status, 400);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+  }
+});
+
+test('concurrent refresh requests bypass stored data and still coalesce in-flight work', async () => {
+  clearChipCache();
+  const previous = globalThis.fetch;
+  let klineCalls = 0;
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    if (value.includes('qt.gtimg.cn')) return quoteResponse();
+    if (value.includes(',qfq')) {
+      klineCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return tencentKlineResponse('qfqday', GOLDEN_ROWS.map((r) => [r.date, r.open, r.close, r.high, r.low, '1000']));
+    }
+    return new Response('{}', { status: 404 });
+  };
+  try {
+    const request = () => onRequestGet({ request: new Request('https://example.com/api/public/v1/chip?symbol=600021&adjust=qfq&refresh=1') });
+    const [a, b] = await Promise.all([request(), request()]);
+    assert.equal(a.status, 200); assert.equal(b.status, 200); assert.equal(klineCalls, 1);
+    assert.deepEqual(new Set([a.headers.get('x-chip-cache'), b.headers.get('x-chip-cache')]), new Set(['BYPASS', 'COALESCED']));
+    assert.equal(a.headers.get('cache-control'), 'no-store');
+    assert.equal(b.headers.get('cache-control'), 'no-store');
+  } finally { globalThis.fetch = previous; }
 });
