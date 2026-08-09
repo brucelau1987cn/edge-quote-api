@@ -3,7 +3,32 @@
  * 支持 A股、港股、美股及期货全市场极速行情，具备【腾讯 -> 新浪 -> 雪球】三源全自动降级容错
  */
 
-import { fetchKlineFromTencent, fetchKlineFromPush2his, computeChipDistribution } from './chip.js';
+import {
+  fetchKlineFromTencent,
+  fetchKlineFromPush2his,
+  computeChipDistribution,
+  computeChipDistributionSeries,
+} from './chip.js';
+
+export {
+  fetchKlineFromTencent,
+  fetchKlineFromPush2his,
+  computeChipDistribution,
+  computeChipDistributionSeries,
+} from './chip.js';
+
+const CHIP_CACHE_TTL_MS = 15 * 60 * 1000;
+const CHIP_CACHE_MAX_ENTRIES = 200;
+const chipCache = new Map(); // key -> { payload, storedAt, expiresAt, promise }
+export function clearChipCache() {
+  chipCache.clear();
+}
+
+function trimChipCache() {
+  while (chipCache.size > CHIP_CACHE_MAX_ENTRIES) {
+    chipCache.delete(chipCache.keys().next().value);
+  }
+}
 
 let cachedXqToken = null;
 let xqTokenExpireAt = 0;
@@ -1152,41 +1177,119 @@ export async function onRequestGet({ request }) {
   if (isChip) {
     const symbol = url.searchParams.get('symbol') || url.searchParams.get('symbols') || '';
     const adjust = url.searchParams.get('adjust') || '';
+    const limitRaw = url.searchParams.get('limit') || '90';
+    const limit = Number(limitRaw);
+    const bypassCache = url.searchParams.get('nocache') === '1' || url.searchParams.get('refresh') === '1';
+    const cacheKey = `${symbol}:${adjust}:${limit}`;
     const headers = {
       'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'public, max-age=30, s-maxage=30',
+      'cache-control': 'public, max-age=300, s-maxage=900, stale-while-revalidate=3600',
       'access-control-allow-origin': '*',
+      'x-content-type-options': 'nosniff',
+      'x-chip-cache-ttl-ms': String(CHIP_CACHE_TTL_MS),
     };
     try {
       if (!symbol) {
+        headers['cache-control'] = 'no-store';
         return new Response(JSON.stringify({ status: 'error', message: 'symbol required' }), {
+          status: 400, headers,
+        });
+      }
+      if (!['', 'qfq', 'hfq'].includes(adjust)) {
+        headers['cache-control'] = 'no-store';
+        return new Response(JSON.stringify({ status: 'error', message: 'invalid adjust' }), {
+          status: 400, headers,
+        });
+      }
+      if (!Number.isInteger(limit) || limit < 1 || limit > 90) {
+        headers['cache-control'] = 'no-store';
+        return new Response(JSON.stringify({ status: 'error', message: 'invalid limit' }), {
+          status: 400, headers,
+        });
+      }
+      if (!/^(?:00|30|60|68)\d{4}$/.test(symbol)) {
+        headers['cache-control'] = 'no-store';
+        return new Response(JSON.stringify({ status: 'error', message: 'unsupported symbol' }), {
           status: 400, headers,
         });
       }
       const marketCode = symbol.startsWith('6') ? 1 : 0;
       const secid = `${marketCode}.${symbol}`;
-      let klines;
-      try {
-        // 优先用腾讯日线（通常可用）
-        klines = await fetchKlineFromTencent(symbol);
-      } catch (e) {
-        // fallback 到 push2his
-        klines = await fetchKlineFromPush2his(secid, adjust);
+      const now = Date.now();
+      if (!bypassCache) {
+        const cached = chipCache.get(cacheKey);
+        if (cached?.payload && cached.expiresAt > now) {
+          headers['x-chip-cache'] = 'HIT';
+          headers['x-chip-cache-age-ms'] = String(now - cached.storedAt);
+          return new Response(JSON.stringify(cached.payload), { status: 200, headers });
+        }
+        if (cached?.promise) {
+          const payload = await cached.promise;
+          headers['x-chip-cache'] = 'COALESCED';
+          return new Response(JSON.stringify(payload), { status: 200, headers });
+        }
       }
-      const chip = computeChipDistribution(klines);
-      if (!chip) throw new Error('chip computation failed');
-      const payload = {
-        status: 'ok',
-        symbol,
-        secid,
-        adjust,
-        kline_count: klines.length,
-        ...chip,
+      const loadPayload = async () => {
+        let klines;
+        let source = 'tencent-kline+local-cyq';
+        try {
+          klines = await fetchKlineFromTencent(symbol, adjust);
+        } catch (tencentError) {
+          source = 'eastmoney-push2his+local-cyq';
+          klines = await fetchKlineFromPush2his(secid, adjust);
+        }
+        const chip = computeChipDistribution(klines);
+        const series = computeChipDistributionSeries(klines, limit);
+        const latest = series.at(-1) || null;
+        const previous = series.at(-2) || null;
+        if (!chip || !latest) throw new Error('chip computation failed');
+        return {
+          status: 'ok', symbol, secid, adjust, source,
+          algorithm: 'akshare-cyq-compatible-approximation',
+          assumptions: {
+            range_bars: 120,
+            price_bins: 150,
+            turnover_source: source.startsWith('tencent')
+              ? 'daily_volume/current_float_shares'
+              : 'eastmoney_daily_turnover',
+          },
+          kline_count: klines.length,
+          as_of: latest.date,
+          latest,
+          previous,
+          profit_ratio_change_pp: previous
+            ? +(latest.profit_ratio_pct - previous.profit_ratio_pct).toFixed(2)
+            : null,
+          series,
+          ...chip,
+        };
       };
+      const promise = loadPayload();
+      if (!bypassCache) {
+        chipCache.set(cacheKey, { promise });
+        trimChipCache();
+      }
+      let payload;
+      try {
+        payload = await promise;
+      } catch (error) {
+        if (!bypassCache) chipCache.delete(cacheKey);
+        throw error;
+      }
+      if (!bypassCache) {
+        chipCache.set(cacheKey, {
+          payload,
+          storedAt: Date.now(),
+          expiresAt: Date.now() + CHIP_CACHE_TTL_MS,
+        });
+        trimChipCache();
+      }
+      headers['x-chip-cache'] = bypassCache ? 'BYPASS' : 'MISS';
       return new Response(JSON.stringify(payload), { status: 200, headers });
     } catch (err) {
-      headers['x-chip-error'] = err.message;
-      return new Response(JSON.stringify({ status: 'error', message: err.message }), {
+      headers['cache-control'] = 'no-store';
+      console.error(JSON.stringify({ event: 'chip_error', symbol, adjust, message: err.message || 'unknown' }));
+      return new Response(JSON.stringify({ status: 'error', message: 'chip data unavailable' }), {
         status: 502, headers,
       });
     }

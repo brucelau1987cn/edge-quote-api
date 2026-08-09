@@ -4,11 +4,26 @@
  * 数据源：腾讯 fqkline 日线（OHLCV）+ 腾讯行情流通股本（计算换手率）
  */
 
+function validateKlines(klines) {
+  if (!Array.isArray(klines) || klines.length === 0) throw new Error('empty kline data');
+  let previousDate = '';
+  for (const kline of klines) {
+    const values = [kline.open, kline.close, kline.high, kline.low, kline.volume, kline.hsl];
+    if (!kline.date || values.some((value) => !Number.isFinite(value))) throw new Error('invalid kline value');
+    if (kline.open <= 0 || kline.close <= 0 || kline.low <= 0 || kline.high < kline.low) throw new Error('invalid OHLC');
+    if (kline.open < kline.low || kline.open > kline.high || kline.close < kline.low || kline.close > kline.high) throw new Error('invalid OHLC');
+    if (kline.volume < 0 || kline.hsl < 0 || kline.hsl > 100) throw new Error('invalid turnover');
+    if (previousDate && kline.date <= previousDate) throw new Error('invalid kline order');
+    previousDate = kline.date;
+  }
+  return klines;
+}
+
 /**
  * 从腾讯获取日K线数据（OHLCV + 计算换手率）
  * 先通过 qt.gtimg.cn 获取流通股本，再从 fqkline 获取日线，计算 hsl
  */
-async function fetchKlineFromTencent(symbol) {
+async function fetchKlineFromTencent(symbol, adjust = '') {
   const secCode = symbol.startsWith('6') ? `sh${symbol}` : `sz${symbol}`;
 
   // 1. 获取流通股本（从实时行情）
@@ -23,30 +38,36 @@ async function fetchKlineFromTencent(symbol) {
   const price = parseFloat(quoteParts[3]) || 0;
   const floatMv = parseFloat(quoteParts[44]) || 0; // 流通市值（亿）
   const floatShares = floatMv > 0 && price > 0 ? Math.round(floatMv * 1e8 / price / 100) : 0; // 流通股本（手）
+  if (!Number.isFinite(floatShares) || floatShares <= 0) {
+    throw new Error('invalid circulating shares');
+  }
 
-  // 2. 获取日K线（fqkline）
-  const url = `https://ifzq.gtimg.cn/appstock/app/fqkline/get?param=${secCode},day,,,320,qfq`;
+  // 2. 获取日K线：不复权走 kline，前/后复权走 fqkline。
+  const mode = adjust === '' ? 'day' : `${adjust}day`;
+  const url = adjust === ''
+    ? `https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param=${secCode},day,,,320`
+    : `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${secCode},day,,,320,${adjust}`;
   const res = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.qq.com/' },
   });
-  if (!res.ok) throw new Error(`tencent fqkline HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`tencent kline HTTP ${res.status}`);
   const data = await res.json();
-  const kdata = data?.data?.[secCode]?.day || data?.data?.[secCode]?.qfqday;
-  if (!kdata || !kdata.length) throw new Error('tencent fqkline empty');
+  const kdata = data?.data?.[secCode]?.[mode];
+  if (!kdata || !kdata.length) throw new Error('tencent kline empty');
 
   // 腾讯日K: [date, open, close, high, low, volume]
-  return kdata.map((k) => {
-    const vol = parseFloat(k[5]) || 0; // 成交量（手）
+  return validateKlines(kdata.map((k) => {
+    const vol = Number(k[5]); // 成交量（手）
     return {
-      date: k[0],
-      open: parseFloat(k[1]),
-      close: parseFloat(k[2]),
-      high: parseFloat(k[3]),
-      low: parseFloat(k[4]),
+      date: String(k[0] || ''),
+      open: Number(k[1]),
+      close: Number(k[2]),
+      high: Number(k[3]),
+      low: Number(k[4]),
       volume: vol,
-      hsl: floatShares > 0 ? Math.min(100, (vol / floatShares) * 100) : 0, // 换手率(%)
+      hsl: Math.min(100, (vol / floatShares) * 100), // 换手率(%)
     };
-  });
+  }));
 }
 
 /**
@@ -70,14 +91,14 @@ async function fetchKlineFromPush2his(secid, adjust) {
   if (!res.ok) throw new Error(`push2his HTTP ${res.status}`);
   const d = await res.json();
   if (d.rc !== 0 || !d.data?.klines) throw new Error(`push2his rc=${d.rc}`);
-  return d.data.klines.map((line) => {
+  return validateKlines(d.data.klines.map((line) => {
     const parts = line.split(',');
     return {
-      date: parts[0], open: parseFloat(parts[1]), close: parseFloat(parts[2]),
-      high: parseFloat(parts[3]), low: parseFloat(parts[4]),
-      volume: parseFloat(parts[5]), hsl: parseFloat(parts[10]),
+      date: parts[0], open: Number(parts[1]), close: Number(parts[2]),
+      high: Number(parts[3]), low: Number(parts[4]),
+      volume: Number(parts[5]), hsl: Number(parts[10]),
     };
-  });
+  }));
 }
 
 /**
@@ -85,11 +106,10 @@ async function fetchKlineFromPush2his(secid, adjust) {
  * 输入: 日K线数组 (open, close, high, low, hsl)
  * 输出: 最新日的获利比例、平均成本、90/70集中度、90/70成本区间
  */
-function computeChipDistribution(klines) {
+function computeChipDistributionAt(klines, index) {
   const factor = 150;
   const range = 120;
-  const index = klines.length - 1;
-  if (klines.length === 0) return null;
+  if (klines.length === 0 || index < 0 || index >= klines.length) return null;
 
   const start = Math.max(0, index - range + 1);
   const kdata = klines.slice(start, Math.max(1, index + 1));
@@ -182,4 +202,33 @@ function computeChipDistribution(klines) {
   };
 }
 
-export { fetchKlineFromTencent, fetchKlineFromPush2his, computeChipDistribution };
+function computeChipDistribution(klines) {
+  return computeChipDistributionAt(klines, klines.length - 1);
+}
+
+function computeChipDistributionSeries(klines, limit = 90) {
+  const count = Math.max(1, Math.min(90, Number(limit) || 90));
+  const all = klines.map((kline, index) => {
+    const chip = computeChipDistributionAt(klines, index);
+    return {
+      date: kline.date,
+      profit_ratio_pct: chip.benefitPart,
+      average_cost: chip.avgCost,
+      average_cost_deviation_pct: chip.avgCostPct,
+      cost_90_low: chip.pct90.low,
+      cost_90_high: chip.pct90.high,
+      concentration_90_pct: chip.pct90.concentration,
+      cost_70_low: chip.pct70.low,
+      cost_70_high: chip.pct70.high,
+      concentration_70_pct: chip.pct70.concentration,
+    };
+  });
+  return all.slice(-count);
+}
+
+export {
+  fetchKlineFromTencent,
+  fetchKlineFromPush2his,
+  computeChipDistribution,
+  computeChipDistributionSeries,
+};
