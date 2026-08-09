@@ -3,6 +3,8 @@
  * 支持 A股、港股、美股及期货全市场极速行情，具备【腾讯 -> 新浪 -> 雪球】三源全自动降级容错
  */
 
+import { fetchKlineFromTencent, fetchKlineFromPush2his, computeChipDistribution } from './chip.js';
+
 let cachedXqToken = null;
 let xqTokenExpireAt = 0;
 
@@ -1145,6 +1147,50 @@ export async function onRequestGet({ request }) {
   const url = new URL(request.url);
   const path = url.pathname || '';
   const isKline = /\/kline(?:\.js)?$/i.test(path) || url.searchParams.get('mode') === 'kline';
+  const isChip = /\/chip(?:\.js)?$/i.test(path);
+
+  if (isChip) {
+    const symbol = url.searchParams.get('symbol') || url.searchParams.get('symbols') || '';
+    const adjust = url.searchParams.get('adjust') || '';
+    const headers = {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'public, max-age=30, s-maxage=30',
+      'access-control-allow-origin': '*',
+    };
+    try {
+      if (!symbol) {
+        return new Response(JSON.stringify({ status: 'error', message: 'symbol required' }), {
+          status: 400, headers,
+        });
+      }
+      const marketCode = symbol.startsWith('6') ? 1 : 0;
+      const secid = `${marketCode}.${symbol}`;
+      let klines;
+      try {
+        // 优先用腾讯日线（通常可用）
+        klines = await fetchKlineFromTencent(symbol);
+      } catch (e) {
+        // fallback 到 push2his
+        klines = await fetchKlineFromPush2his(secid, adjust);
+      }
+      const chip = computeChipDistribution(klines);
+      if (!chip) throw new Error('chip computation failed');
+      const payload = {
+        status: 'ok',
+        symbol,
+        secid,
+        adjust,
+        kline_count: klines.length,
+        ...chip,
+      };
+      return new Response(JSON.stringify(payload), { status: 200, headers });
+    } catch (err) {
+      headers['x-chip-error'] = err.message;
+      return new Response(JSON.stringify({ status: 'error', message: err.message }), {
+        status: 502, headers,
+      });
+    }
+  }
 
   if (isKline) {
     const symbol = url.searchParams.get('symbol') || url.searchParams.get('symbols') || '';
