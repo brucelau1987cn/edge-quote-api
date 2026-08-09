@@ -15,6 +15,7 @@
 - 可观测响应头：`x-quote-cache` / `x-quote-cache-layer` / `x-quote-source`。
 - 强制刷新：`?nocache=1` 或 `?refresh=1`。
 - 5s CDN `cache-control` 与 CORS。
+- A 股筹码分布 V2：不复权 / QFQ / HFQ、最近 90 个交易日序列、同口径昨日变化、严格校验与请求合并。
 
 ## 双入口导出（Workers + Pages）
 
@@ -27,8 +28,10 @@
 
 ```sh
 npm run sync:quote
-# 将本仓库 src/index.js 同步到
+# 将本仓库 src/index.js / src/chip.js 同步到
 # etf-rotation-blog/functions/api/public/v1/quote.js
+# etf-rotation-blog/functions/api/public/v1/chip.js
+# etf-rotation-blog/functions/api/public/v1/_chip.js
 ```
 
 **本仓库是行情逻辑唯一源**。不要只在 blog 的 `functions/` 里改 quote 实现。
@@ -143,6 +146,43 @@ x-quote-cache-session: closed
 ```
 
 前端请用 blog 的 `normalizeQuotePayload` 统一转成 `{ ok, items }`，避免各页各自解析。
+
+### `GET /api/public/v1/chip`
+
+A 股筹码分布 V2。Worker 与 Pages 主接口使用同一源文件和响应契约：
+
+- Worker：`https://edge-quote-api.brucelau1987.workers.dev/api/public/v1/chip`
+- Pages：`https://etf.peekabo.cc/api/public/v1/chip`
+
+参数：
+
+- `symbol`：沪深六位 A 股代码，首期支持 `00` / `30` / `60` / `68` 开头。
+- `adjust`：`""`（不复权）、`qfq`、`hfq`。
+- `limit`：规范整数 `1–90`，默认 `90`；`01`、`1.0`、`1e0` 会被拒绝。
+- `refresh=1` / `nocache=1`：跳过已完成缓存，相同在途计算继续合并；响应使用 `no-store`。
+
+```bash
+curl "https://edge-quote-api.brucelau1987.workers.dev/api/public/v1/chip?symbol=600021&adjust=qfq&limit=90"
+curl "https://etf.peekabo.cc/api/public/v1/chip?symbol=600021&adjust=hfq&limit=1&refresh=1"
+```
+
+主要响应字段：
+
+- `series`：最近 `limit` 个交易日，按时间升序。
+- `latest` / `previous`：同一算法、同一复权口径的相邻交易日；`limit=1` 仍返回 `previous`。
+- `profit_ratio_change_pp`：最新与昨日获利盘的百分点变化。
+- `source` / `algorithm` / `assumptions`：数据源、算法和换手率假设。
+- `x-chip-cache`：`MISS` / `HIT` / `BYPASS` / `COALESCED`。
+
+## 筹码 V2 注意事项
+
+- 腾讯路径用“每日成交量 ÷ 当前流通股本”估算历史换手率。股本变动期间可能产生偏差；响应中的 `assumptions.turnover_source` 会明确标注。
+- 腾讯失败时才尝试东财 `push2his`；该上游在部分网络环境可能返回 HTTP 520。
+- 错误响应经过脱敏并设置 `Cache-Control: no-store`，提供商细节只写入 Worker 结构化日志。
+- `src/index.js` 与 `src/chip.js` 是唯一源。Pages 同步必须让 import 和 re-export 都指向 `./_chip.js`，避免 `chip.js` 路由自引用循环。
+- `SI=F` / `GC=F` / `CL=F` 连续合约别名需在 quote、chip、kline 三个生成模块中保持一致。
+- Worker 和 Pages 是两个独立部署目标。修改后分别部署，并对两个入口用相同参数比较状态码、JSON 字段和缓存头。
+- Cloudflare 凭据只放在本机凭据文件或 CI Secret，严禁提交 Global API Key、API Token、邮箱密钥组合。
 
 ## 本地开发
 
