@@ -4,6 +4,7 @@ import { deflateSync } from 'node:zlib';
 import {
   BAOSTOCK_HEADER_LENGTH,
   buildBaoStockMessage,
+  crc32,
   fetchKlineFromBaoStock,
   parseBaoStockResponseBytes,
   parseHistoryResponse,
@@ -12,11 +13,12 @@ import {
 
 const SEP = '\x01';
 
-function responseFrame(type, body, compressed = false) {
+function responseFrame(type, body, compressed = false, version = '00.9.30') {
   const bodyBytes = compressed ? deflateSync(Buffer.from(body)) : Buffer.from(body);
-  const header = `00.9.30${SEP}${type}${SEP}${String(bodyBytes.length).padStart(10, '0')}`;
+  const header = `${version}${SEP}${type}${SEP}${String(bodyBytes.length).padStart(10, '0')}`;
   assert.equal(Buffer.byteLength(header), BAOSTOCK_HEADER_LENGTH);
-  return Buffer.concat([Buffer.from(header), bodyBytes, Buffer.from('<![CDATA[]]>\n')]);
+  const checksum = String(crc32(Buffer.concat([Buffer.from(header), bodyBytes])));
+  return Buffer.concat([Buffer.from(header), bodyBytes, Buffer.from(`${SEP}${checksum}<![CDATA[]]>\n`)]);
 }
 
 test('buildBaoStockMessage matches the documented header/body/crc framing', () => {
@@ -28,8 +30,7 @@ test('buildBaoStockMessage matches the documented header/body/crc framing', () =
 
 test('parseBaoStockResponseBytes handles plain login response and server patch version', async () => {
   const body = ['0', 'success', 'login', 'anonymous'].join(SEP);
-  const frame = responseFrame('01', body);
-  frame.set(Buffer.from('00.9.00'), 0);
+  const frame = responseFrame('01', body, false, '00.9.00');
   const parsed = await parseBaoStockResponseBytes(frame);
   assert.equal(parsed.type, '01');
   assert.deepEqual(parsed.fields, ['0', 'success', 'login', 'anonymous']);
@@ -71,6 +72,11 @@ test('parseBaoStockResponseBytes rejects missing, wrong, or extra trailer bytes'
   const wrongCompressed = Buffer.from(compressed);
   wrongCompressed[wrongCompressed.length - 2] = 0x21;
   await assert.rejects(() => parseBaoStockResponseBytes(wrongCompressed), /trailer/);
+
+  const badCrc = Buffer.from(plain);
+  const crcStart = BAOSTOCK_HEADER_LENGTH + Buffer.byteLength(body) + 1;
+  badCrc[crcStart] = badCrc[crcStart] === 0x39 ? 0x38 : 0x39;
+  await assert.rejects(() => parseBaoStockResponseBytes(badCrc), /checksum/);
 });
 
 test('readBaoStockFrame rejects oversized frames and cancels a timed-out reader', async () => {
