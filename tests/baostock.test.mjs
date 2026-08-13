@@ -18,8 +18,7 @@ function responseFrame(type, body, compressed = false, version = '00.9.30') {
   const header = `${version}${SEP}${type}${SEP}${String(bodyBytes.length).padStart(10, '0')}`;
   assert.equal(Buffer.byteLength(header), BAOSTOCK_HEADER_LENGTH);
   const checksum = String(crc32(Buffer.concat([Buffer.from(header), bodyBytes])));
-  const separator = compressed ? '\n' : '';
-  return Buffer.concat([Buffer.from(header), bodyBytes, Buffer.from(`${SEP}${checksum}${separator}<![CDATA[]]>\n`)]);
+  return Buffer.concat([Buffer.from(header), bodyBytes, Buffer.from(`${SEP}${checksum}<![CDATA[]]>\n`)]);
 }
 
 test('buildBaoStockMessage matches the documented header/body/crc framing', () => {

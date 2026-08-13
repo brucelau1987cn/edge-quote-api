@@ -41,7 +41,7 @@ function expectedBaoStockFrameLength(bytes) {
   const bodyLength = Number(fields[2]);
   if (fields.length !== 3 || !Number.isInteger(bodyLength) || bodyLength < 0) return -1;
   if (bodyLength > MAX_BAOSTOCK_BODY_BYTES) return -2;
-  return BAOSTOCK_HEADER_LENGTH + bodyLength + 1 + MAX_BAOSTOCK_CHECKSUM_BYTES + 1 + RESPONSE_TRAILER.length;
+  return BAOSTOCK_HEADER_LENGTH + bodyLength + 1 + MAX_BAOSTOCK_CHECKSUM_BYTES + RESPONSE_TRAILER.length;
 }
 
 async function parseBaoStockResponseBytes(input) {
@@ -58,7 +58,7 @@ async function parseBaoStockResponseBytes(input) {
   const trailer = RESPONSE_TRAILER;
   const bodyEnd = BAOSTOCK_HEADER_LENGTH + bodyLength;
   const minimumLength = bodyEnd + 1 + 1 + trailer.length;
-  const maximumLength = bodyEnd + 1 + MAX_BAOSTOCK_CHECKSUM_BYTES + 1 + trailer.length;
+  const maximumLength = bodyEnd + 1 + MAX_BAOSTOCK_CHECKSUM_BYTES + trailer.length;
   if (!Number.isInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_BAOSTOCK_BODY_BYTES) {
     throw new Error('invalid baostock body length');
   }
@@ -68,9 +68,7 @@ async function parseBaoStockResponseBytes(input) {
   const actualTrailer = bytes.slice(trailerStart);
   if (!equalBytes(actualTrailer, trailer)) throw new Error('invalid baostock trailer');
   if (bytes[bodyEnd] !== 0x01) throw new Error('invalid baostock checksum separator');
-  let checksumEnd = trailerStart;
-  if (checksumEnd > bodyEnd + 1 && bytes[checksumEnd - 1] === 0x0a) checksumEnd -= 1;
-  const checksumText = decoder.decode(bytes.slice(bodyEnd + 1, checksumEnd));
+  const checksumText = decoder.decode(bytes.slice(bodyEnd + 1, trailerStart));
   if (!/^\d{1,10}$/.test(checksumText)) throw new Error('invalid baostock checksum');
   const expectedChecksum = crc32(bytes.slice(0, bodyEnd));
   if (Number(checksumText) !== expectedChecksum) throw new Error('invalid baostock checksum');
