@@ -2,9 +2,6 @@ const BAOSTOCK_VERSION = '00.9.30';
 const SEP = '\x01';
 const BAOSTOCK_HEADER_LENGTH = 21;
 const COMPRESSED_TYPES = new Set(['96', '99', '9B', '9D']);
-const COMPRESSED_TRAILER = new TextEncoder().encode('<![CDATA[]]>\n');
-const PLAIN_TRAILER = new Uint8Array([0x0a]);
-const MAX_BAOSTOCK_BODY_BYTES = 2_000_000;
 
 function crc32(bytes) {
   let crc = 0xffffffff;
@@ -30,22 +27,13 @@ async function inflateZlib(bytes) {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-function trailerForType(type) {
-  return COMPRESSED_TYPES.has(type) ? COMPRESSED_TRAILER : PLAIN_TRAILER;
-}
-
-function equalBytes(actual, expected) {
-  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
-}
-
 function expectedBaoStockFrameLength(bytes) {
   if (bytes.length < BAOSTOCK_HEADER_LENGTH) return null;
   const header = new TextDecoder().decode(bytes.slice(0, BAOSTOCK_HEADER_LENGTH));
   const fields = header.split(SEP);
   const bodyLength = Number(fields[2]);
   if (fields.length !== 3 || !Number.isInteger(bodyLength) || bodyLength < 0) return -1;
-  if (bodyLength > MAX_BAOSTOCK_BODY_BYTES) return -2;
-  return BAOSTOCK_HEADER_LENGTH + bodyLength + trailerForType(fields[1]).length;
+  return BAOSTOCK_HEADER_LENGTH + bodyLength + (COMPRESSED_TYPES.has(fields[1]) ? 13 : 1);
 }
 
 async function parseBaoStockResponseBytes(input) {
@@ -59,15 +47,9 @@ async function parseBaoStockResponseBytes(input) {
   }
   const [version, type, bodyLengthRaw] = headerFields;
   const bodyLength = Number(bodyLengthRaw);
-  const trailer = trailerForType(type);
-  const expectedLength = BAOSTOCK_HEADER_LENGTH + bodyLength + trailer.length;
-  if (!Number.isInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_BAOSTOCK_BODY_BYTES) {
+  if (!Number.isInteger(bodyLength) || bodyLength < 0 || bytes.length < BAOSTOCK_HEADER_LENGTH + bodyLength) {
     throw new Error('invalid baostock body length');
   }
-  if (bytes.length < expectedLength) throw new Error('truncated baostock response');
-  if (bytes.length !== expectedLength) throw new Error('invalid baostock frame length');
-  const actualTrailer = bytes.slice(BAOSTOCK_HEADER_LENGTH + bodyLength);
-  if (!equalBytes(actualTrailer, trailer)) throw new Error('invalid baostock trailer');
   let bodyBytes = bytes.slice(BAOSTOCK_HEADER_LENGTH, BAOSTOCK_HEADER_LENGTH + bodyLength);
   if (COMPRESSED_TYPES.has(type)) bodyBytes = await inflateZlib(bodyBytes);
   const body = decoder.decode(bodyBytes).replace(/\n$/, '');
@@ -105,40 +87,23 @@ async function readBaoStockFrame(reader, timeoutMs = 10000) {
   const chunks = [];
   let size = 0;
   const deadline = Date.now() + timeoutMs;
-  try {
-    while (Date.now() < deadline) {
-      const remaining = Math.max(1, deadline - Date.now());
-      let timer;
-      const readPromise = reader.read();
-      const timeoutPromise = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('baostock read timeout')), remaining);
-      });
-      let result;
-      try {
-        result = await Promise.race([readPromise, timeoutPromise]);
-      } finally {
-        clearTimeout(timer);
-      }
-      if (result.done) break;
-      chunks.push(result.value);
-      size += result.value.length;
-      if (size > MAX_BAOSTOCK_BODY_BYTES + BAOSTOCK_HEADER_LENGTH + COMPRESSED_TRAILER.length) {
-        throw new Error('baostock frame too large');
-      }
-      const bytes = new Uint8Array(size);
-      let offset = 0;
-      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-      const expected = expectedBaoStockFrameLength(bytes);
-      if (expected === -2) throw new Error('baostock frame too large');
-      if (expected === -1) throw new Error('invalid baostock frame');
-      if (expected && size > expected) throw new Error('invalid baostock frame length');
-      if (expected && size === expected) return bytes;
-    }
-    throw new Error('truncated baostock frame');
-  } catch (error) {
-    try { await reader.cancel(error); } catch {}
-    throw error;
+  while (Date.now() < deadline) {
+    const remaining = Math.max(1, deadline - Date.now());
+    const result = await Promise.race([
+      reader.read(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('baostock read timeout')), remaining)),
+    ]);
+    if (result.done) break;
+    chunks.push(result.value);
+    size += result.value.length;
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    const expected = expectedBaoStockFrameLength(bytes);
+    if (expected === -1) throw new Error('invalid baostock frame');
+    if (expected && size >= expected) return bytes.slice(0, expected);
   }
+  throw new Error('truncated baostock frame');
 }
 
 async function sendBaoStockRequest(writer, reader, type, body) {
@@ -146,18 +111,16 @@ async function sendBaoStockRequest(writer, reader, type, body) {
   return parseBaoStockResponseBytes(await readBaoStockFrame(reader));
 }
 
-async function fetchKlineFromBaoStockOnce(symbol, adjust = '', connectOverride = null) {
+async function fetchKlineFromBaoStock(symbol, adjust = '', connectOverride = null) {
   const connectFn = connectOverride || (await import('cloudflare:sockets')).connect;
   const secCode = symbol.startsWith('6') ? `sh.${symbol}` : `sz.${symbol}`;
   const adjustFlag = { '': '3', qfq: '2', hfq: '1' }[adjust];
   if (!adjustFlag) throw new Error('invalid baostock adjust');
   const socket = connectFn({ hostname: 'public-api.baostock.com', port: 10030 });
-  let writer;
-  let reader;
+  await socket.opened;
+  const writer = socket.writable.getWriter();
+  const reader = socket.readable.getReader();
   try {
-    await socket.opened;
-    writer = socket.writable.getWriter();
-    reader = socket.readable.getReader();
     const login = await sendBaoStockRequest(writer, reader, '00', ['login', 'anonymous', '123456', '0'].join(SEP));
     if (login.type !== '01' || login.fields[0] !== '0' || !login.fields[3]) {
       throw new Error(`baostock login ${login.fields[0] || 'failed'}`);
@@ -168,29 +131,10 @@ async function fetchKlineFromBaoStockOnce(symbol, adjust = '', connectOverride =
       'date,open,high,low,close,volume,amount,turn', start, end, 'd', adjustFlag].join(SEP);
     return parseHistoryResponse(await sendBaoStockRequest(writer, reader, '95', body), adjust);
   } finally {
-    if (reader) {
-      try { await reader.cancel(); } catch {}
-      try { reader.releaseLock(); } catch {}
-    }
-    if (writer) {
-      try { await writer.close(); } catch {}
-      try { writer.releaseLock(); } catch {}
-    }
-    try { await socket.close(); } catch {}
+    try { writer.releaseLock(); } catch {}
+    try { reader.releaseLock(); } catch {}
+    await socket.close();
   }
-}
-
-async function fetchKlineFromBaoStock(symbol, adjust = '', connectOverride = null) {
-  let lastError;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      return await fetchKlineFromBaoStockOnce(symbol, adjust, connectOverride);
-    } catch (error) {
-      lastError = error;
-      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 120));
-    }
-  }
-  throw lastError;
 }
 
 export {
@@ -200,5 +144,4 @@ export {
   fetchKlineFromBaoStock,
   parseBaoStockResponseBytes,
   parseHistoryResponse,
-  readBaoStockFrame,
 };

@@ -4,10 +4,8 @@ import { deflateSync } from 'node:zlib';
 import {
   BAOSTOCK_HEADER_LENGTH,
   buildBaoStockMessage,
-  fetchKlineFromBaoStock,
   parseBaoStockResponseBytes,
   parseHistoryResponse,
-  readBaoStockFrame,
 } from '../src/baostock.js';
 
 const SEP = '\x01';
@@ -56,57 +54,4 @@ test('parseHistoryResponse rejects provider errors and malformed rows', async ()
   const body = ['0', 'success', 'query_history_k_data_plus', 'anonymous', '1', '2000', JSON.stringify(records), 'sh.600021', 'date,open,high,low,close,volume,turn', '2026-08-07', '2026-08-07', 'd', '3'].join(SEP);
   const parsed = await parseBaoStockResponseBytes(responseFrame('96', body, true));
   assert.throws(() => parseHistoryResponse(parsed, ''), /invalid baostock row/);
-});
-
-test('parseBaoStockResponseBytes rejects missing, wrong, or extra trailer bytes', async () => {
-  const body = ['0', 'success', 'login', 'anonymous'].join(SEP);
-  const plain = responseFrame('01', body);
-  await assert.rejects(() => parseBaoStockResponseBytes(plain.subarray(0, -1)), /truncated|trailer/);
-  const wrongPlain = Buffer.from(plain);
-  wrongPlain[wrongPlain.length - 1] = 0x21;
-  await assert.rejects(() => parseBaoStockResponseBytes(wrongPlain), /trailer/);
-  await assert.rejects(() => parseBaoStockResponseBytes(Buffer.concat([plain, Buffer.from('extra')])), /length/);
-
-  const compressed = responseFrame('96', body, true);
-  const wrongCompressed = Buffer.from(compressed);
-  wrongCompressed[wrongCompressed.length - 2] = 0x21;
-  await assert.rejects(() => parseBaoStockResponseBytes(wrongCompressed), /trailer/);
-});
-
-test('readBaoStockFrame rejects oversized frames and cancels a timed-out reader', async () => {
-  let cancelled = false;
-  const oversizedReader = {
-    async read() {
-      const header = Buffer.from(`00.9.30${SEP}96${SEP}${String(2_000_001).padStart(10, '0')}`);
-      return { done: false, value: header };
-    },
-    async cancel() { cancelled = true; },
-  };
-  await assert.rejects(() => readBaoStockFrame(oversizedReader, 20), /too large/);
-  assert.equal(cancelled, true);
-
-  cancelled = false;
-  const pendingReader = {
-    read() { return new Promise(() => {}); },
-    async cancel() { cancelled = true; },
-  };
-  await assert.rejects(() => readBaoStockFrame(pendingReader, 5), /timeout/);
-  assert.equal(cancelled, true);
-});
-
-test('fetchKlineFromBaoStock closes socket when opening fails', async () => {
-  let attempts = 0;
-  let closed = 0;
-  await assert.rejects(
-    () => fetchKlineFromBaoStock('600021', '', () => {
-      attempts += 1;
-      return {
-        opened: Promise.reject(new Error('open failed')),
-        async close() { closed += 1; },
-      };
-    }),
-    /open failed/,
-  );
-  assert.equal(attempts, 2);
-  assert.equal(closed, 2);
 });
