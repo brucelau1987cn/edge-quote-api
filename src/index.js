@@ -1308,15 +1308,7 @@ export async function onRequestGet({ request }) {
       return new Response(JSON.stringify(payload), { status: 200, headers });
     } catch (err) {
       headers['cache-control'] = 'no-store';
-      const message = String(err?.message || 'unknown');
-      headers['x-chip-error-class'] = message.includes('trailer') ? 'baostock-trailer'
-        : message.includes('timeout') ? 'upstream-timeout'
-          : message.includes('decompress') || message.includes('deflate') ? 'baostock-deflate'
-            : message.includes('frame length') ? 'baostock-frame-length'
-              : message.includes('login') ? 'baostock-login'
-                : message.includes('records') || message.includes('row') ? 'baostock-payload'
-                  : 'upstream-failure';
-      console.error(JSON.stringify({ event: 'chip_error', symbol, adjust, message }));
+      console.error(JSON.stringify({ event: 'chip_error', symbol, adjust, message: err.message || 'unknown' }));
       return new Response(JSON.stringify({ status: 'error', message: 'chip data unavailable' }), {
         status: 502, headers,
       });
