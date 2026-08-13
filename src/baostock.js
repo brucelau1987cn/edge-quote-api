@@ -2,8 +2,7 @@ const BAOSTOCK_VERSION = '00.9.30';
 const SEP = '\x01';
 const BAOSTOCK_HEADER_LENGTH = 21;
 const COMPRESSED_TYPES = new Set(['96', '99', '9B', '9D']);
-const COMPRESSED_TRAILER = new TextEncoder().encode('<![CDATA[]]>\n');
-const PLAIN_TRAILER = new Uint8Array([0x0a]);
+const RESPONSE_TRAILER = new TextEncoder().encode('<![CDATA[]]>\n');
 const MAX_BAOSTOCK_BODY_BYTES = 2_000_000;
 
 function crc32(bytes) {
@@ -30,10 +29,6 @@ async function inflateZlib(bytes) {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-function trailerForType(type) {
-  return COMPRESSED_TYPES.has(type) ? COMPRESSED_TRAILER : PLAIN_TRAILER;
-}
-
 function equalBytes(actual, expected) {
   return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
 }
@@ -45,7 +40,7 @@ function expectedBaoStockFrameLength(bytes) {
   const bodyLength = Number(fields[2]);
   if (fields.length !== 3 || !Number.isInteger(bodyLength) || bodyLength < 0) return -1;
   if (bodyLength > MAX_BAOSTOCK_BODY_BYTES) return -2;
-  return BAOSTOCK_HEADER_LENGTH + bodyLength + trailerForType(fields[1]).length;
+  return BAOSTOCK_HEADER_LENGTH + bodyLength + RESPONSE_TRAILER.length;
 }
 
 async function parseBaoStockResponseBytes(input) {
@@ -59,7 +54,7 @@ async function parseBaoStockResponseBytes(input) {
   }
   const [version, type, bodyLengthRaw] = headerFields;
   const bodyLength = Number(bodyLengthRaw);
-  const trailer = trailerForType(type);
+  const trailer = RESPONSE_TRAILER;
   const expectedLength = BAOSTOCK_HEADER_LENGTH + bodyLength + trailer.length;
   if (!Number.isInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_BAOSTOCK_BODY_BYTES) {
     throw new Error('invalid baostock body length');
@@ -122,7 +117,7 @@ async function readBaoStockFrame(reader, timeoutMs = 10000) {
       if (result.done) break;
       chunks.push(result.value);
       size += result.value.length;
-      if (size > MAX_BAOSTOCK_BODY_BYTES + BAOSTOCK_HEADER_LENGTH + COMPRESSED_TRAILER.length) {
+      if (size > MAX_BAOSTOCK_BODY_BYTES + BAOSTOCK_HEADER_LENGTH + RESPONSE_TRAILER.length) {
         throw new Error('baostock frame too large');
       }
       const bytes = new Uint8Array(size);
