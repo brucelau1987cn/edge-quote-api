@@ -4,7 +4,6 @@ const BAOSTOCK_HEADER_LENGTH = 21;
 const COMPRESSED_TYPES = new Set(['96', '99', '9B', '9D']);
 const RESPONSE_TRAILER = new TextEncoder().encode('<![CDATA[]]>\n');
 const MAX_BAOSTOCK_BODY_BYTES = 2_000_000;
-const MAX_BAOSTOCK_CHECKSUM_BYTES = 10;
 
 function crc32(bytes) {
   let crc = 0xffffffff;
@@ -41,7 +40,7 @@ function expectedBaoStockFrameLength(bytes) {
   const bodyLength = Number(fields[2]);
   if (fields.length !== 3 || !Number.isInteger(bodyLength) || bodyLength < 0) return -1;
   if (bodyLength > MAX_BAOSTOCK_BODY_BYTES) return -2;
-  return BAOSTOCK_HEADER_LENGTH + bodyLength + 1 + MAX_BAOSTOCK_CHECKSUM_BYTES + RESPONSE_TRAILER.length;
+  return BAOSTOCK_HEADER_LENGTH + bodyLength + RESPONSE_TRAILER.length;
 }
 
 async function parseBaoStockResponseBytes(input) {
@@ -56,23 +55,15 @@ async function parseBaoStockResponseBytes(input) {
   const [version, type, bodyLengthRaw] = headerFields;
   const bodyLength = Number(bodyLengthRaw);
   const trailer = RESPONSE_TRAILER;
-  const bodyEnd = BAOSTOCK_HEADER_LENGTH + bodyLength;
-  const minimumLength = bodyEnd + 1 + 1 + trailer.length;
-  const maximumLength = bodyEnd + 1 + MAX_BAOSTOCK_CHECKSUM_BYTES + trailer.length;
+  const expectedLength = BAOSTOCK_HEADER_LENGTH + bodyLength + trailer.length;
   if (!Number.isInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_BAOSTOCK_BODY_BYTES) {
     throw new Error('invalid baostock body length');
   }
-  if (bytes.length < minimumLength) throw new Error('truncated baostock response');
-  if (bytes.length > maximumLength) throw new Error('invalid baostock frame length');
-  const trailerStart = bytes.length - trailer.length;
-  const actualTrailer = bytes.slice(trailerStart);
+  if (bytes.length < expectedLength) throw new Error('truncated baostock response');
+  if (bytes.length !== expectedLength) throw new Error('invalid baostock frame length');
+  const actualTrailer = bytes.slice(BAOSTOCK_HEADER_LENGTH + bodyLength);
   if (!equalBytes(actualTrailer, trailer)) throw new Error('invalid baostock trailer');
-  if (bytes[bodyEnd] !== 0x01) throw new Error('invalid baostock checksum separator');
-  const checksumText = decoder.decode(bytes.slice(bodyEnd + 1, trailerStart));
-  if (!/^\d{1,10}$/.test(checksumText)) throw new Error('invalid baostock checksum');
-  const expectedChecksum = crc32(bytes.slice(0, bodyEnd));
-  if (Number(checksumText) !== expectedChecksum) throw new Error('invalid baostock checksum');
-  let bodyBytes = bytes.slice(BAOSTOCK_HEADER_LENGTH, bodyEnd);
+  let bodyBytes = bytes.slice(BAOSTOCK_HEADER_LENGTH, BAOSTOCK_HEADER_LENGTH + bodyLength);
   if (COMPRESSED_TYPES.has(type)) bodyBytes = await inflateZlib(bodyBytes);
   const body = decoder.decode(bodyBytes).replace(/\n$/, '');
   return { version, type, body, fields: body.split(SEP) };
@@ -136,12 +127,7 @@ async function readBaoStockFrame(reader, timeoutMs = 10000) {
       if (expected === -2) throw new Error('baostock frame too large');
       if (expected === -1) throw new Error('invalid baostock frame');
       if (expected && size > expected) throw new Error('invalid baostock frame length');
-      if (expected) {
-        const trailerStart = size - RESPONSE_TRAILER.length;
-        if (trailerStart >= BAOSTOCK_HEADER_LENGTH && equalBytes(bytes.slice(trailerStart), RESPONSE_TRAILER)) {
-          return bytes;
-        }
-      }
+      if (expected && size === expected) return bytes;
     }
     throw new Error('truncated baostock frame');
   } catch (error) {
@@ -205,7 +191,6 @@ async function fetchKlineFromBaoStock(symbol, adjust = '', connectOverride = nul
 export {
   BAOSTOCK_HEADER_LENGTH,
   buildBaoStockMessage,
-  crc32,
   expectedBaoStockFrameLength,
   fetchKlineFromBaoStock,
   parseBaoStockResponseBytes,
