@@ -9,6 +9,7 @@ import {
   computeChipDistributionSeries,
 } from './chip.js';
 import { fetchKlineFromBaoStock } from './baostock.js';
+import { handleThsInternal } from './ths.js';
 
 export {
   fetchKlineFromTencent,
@@ -1173,9 +1174,12 @@ export async function fetchKline1m(symbol, { limit = 240, at = null, defaultExch
  * Cloudflare Pages Functions entry (functions/api/public/v1/quote.js or kline.js)
  * and Workers entry (export default.fetch) share this handler.
  */
-export async function onRequestGet({ request }) {
+export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
   const path = url.pathname || '';
+  if (/\/api\/internal\/v1\/ths(?:\/|$)/i.test(path)) {
+    return handleThsInternal({ request, env });
+  }
   const isKline = /\/kline(?:\.js)?$/i.test(path) || url.searchParams.get('mode') === 'kline';
   const isChip = /\/chip(?:\.js)?$/i.test(path);
 
@@ -1473,7 +1477,7 @@ export async function onRequestGet({ request }) {
 }
 
 export default {
-  async fetch(request) {
-    return onRequestGet({ request });
+  async fetch(request, env) {
+    return onRequestGet({ request, env });
   },
 };
