@@ -16,7 +16,7 @@ function responseFrame(type, body, compressed = false) {
   const bodyBytes = compressed ? deflateSync(Buffer.from(body)) : Buffer.from(body);
   const header = `00.9.30${SEP}${type}${SEP}${String(bodyBytes.length).padStart(10, '0')}`;
   assert.equal(Buffer.byteLength(header), BAOSTOCK_HEADER_LENGTH);
-  return Buffer.concat([Buffer.from(header), bodyBytes, Buffer.from('<![CDATA[]]>\n')]);
+  return Buffer.concat([Buffer.from(header), bodyBytes, Buffer.from(compressed ? '<![CDATA[]]>\n' : '\n')]);
 }
 
 test('buildBaoStockMessage matches the documented header/body/crc framing', () => {
