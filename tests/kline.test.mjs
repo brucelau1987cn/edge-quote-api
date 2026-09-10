@@ -4,6 +4,8 @@ import {
   normalizeShanghaiMinuteKey,
   pickMinuteBar,
   fetchKline1m,
+  fetchHistoricalKline,
+  parseSymbol,
   onRequestGet,
   clearKlineCache,
 } from '../src/index.js';
@@ -103,4 +105,75 @@ test('onRequestGet serves /kline path with compact fixed-time payload', async ()
   } finally {
     globalThis.fetch = previous;
   }
+});
+
+test('kline serves complete Yahoo 60m history for HK over the requested 2y range', async () => {
+  clearKlineCache();
+  const previous = globalThis.fetch;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const firstSeconds = nowSeconds - (730 * 86400);
+  globalThis.fetch = async (url) => {
+    const value = String(url);
+    assert.match(value, /query1\.finance\.yahoo\.com\/v8\/finance\/chart\/1378\.HK/);
+    assert.match(value, /interval=60m/);
+    assert.match(value, /range=2y/);
+    return Response.json({ chart: { result: [{
+      meta: { exchangeTimezoneName: 'Asia/Hong_Kong' },
+      timestamp: [firstSeconds, nowSeconds],
+      indicators: { quote: [{
+        open: [1.1, 1.2], high: [1.3, 1.4], low: [1.0, 1.1], close: [1.2, 1.3], volume: [100, 200],
+      }] },
+    }], error: null } });
+  };
+  try {
+    const req = new Request('https://example.com/api/public/v1/kline?symbol=01378.HK&interval=60m&range=2y&nocache=1');
+    const res = await onRequestGet({ request: req });
+    const data = await res.json();
+    assert.equal(res.status, 200);
+    assert.equal(data.requested_interval, '60m');
+    assert.equal(data.actual_interval, '60m');
+    assert.equal(data.requested_range, '2y');
+    assert.deepEqual(data.actual_range, {
+      start: new Date(firstSeconds * 1000).toISOString(),
+      end: new Date(nowSeconds * 1000).toISOString(),
+    });
+    assert.equal(data.source, 'yahoo');
+    assert.equal(data.count, 2);
+    assert.equal(data.complete, true);
+    assert.equal(data.bars[0].close, 1.2);
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
+
+
+test('kline serves complete Sina 30m history for an A-share over 2y', async () => {
+  clearKlineCache();
+  const previous = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    assert.match(String(url), /money\.finance\.sina\.com\.cn/);
+    assert.match(String(url), /symbol=sh600021/);
+    assert.match(String(url), /scale=30/);
+    return Response.json([
+      { day: '2024-09-10 10:00:00', open: '8.2', high: '8.3', low: '8.1', close: '8.25', volume: '100' },
+      { day: '2026-09-10 11:30:00', open: '13.7', high: '13.8', low: '13.6', close: '13.75', volume: '200' },
+    ]);
+  };
+  try {
+    const data = await fetchHistoricalKline('600021.SH', { interval: '30m', range: '2y', nowMs: Date.parse('2026-09-10T12:00:00+08:00') });
+    assert.equal(data.source, 'sina');
+    assert.equal(data.complete, true);
+    assert.equal(data.count, 2);
+    assert.equal(data.bars[0].minute, '2024-09-10 10:00');
+  } finally {
+    globalThis.fetch = previous;
+  }
+});
+
+test('kline accepts the Yahoo .SS alias and rejects unsupported history dimensions', async () => {
+  assert.equal(parseSymbol('000001.SS').tencent, 'sh000001');
+  const response = await onRequestGet({ request: new Request('https://example.com/kline?symbol=600021.SH&interval=5m&range=2y') });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).code, 'INVALID_REQUEST');
+  assert.equal(response.headers.get('cache-control'), 'no-store');
 });
